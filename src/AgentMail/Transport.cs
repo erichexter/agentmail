@@ -1,0 +1,58 @@
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+
+namespace AgentMail;
+
+/// <summary>HTTP client for talking to a peer's relay. JSON bodies, bearer-token auth.</summary>
+static class Transport
+{
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
+
+    private static HttpRequestMessage Auth(HttpMethod m, string url, string token, HttpContent? body)
+    {
+        var req = new HttpRequestMessage(m, url) { Content = body };
+        if (token.Length > 0) req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return req;
+    }
+
+    public static async Task<(bool ok, string detail)> SendInbox(string endpoint, string token, Envelope env)
+    {
+        try
+        {
+            using var req = Auth(HttpMethod.Post, $"{endpoint}/inbox", token, JsonContent.Create(env, options: Paths.Json));
+            using var res = await Http.SendAsync(req);
+            string detail = await res.Content.ReadAsStringAsync();
+            return (res.IsSuccessStatusCode, $"{(int)res.StatusCode} {res.ReasonPhrase} {detail}".Trim());
+        }
+        catch (Exception e) { return (false, e.Message); }
+    }
+
+    public static async Task<(bool ok, string detail)> Register(string endpoint, string token, AgentRecord rec)
+    {
+        try
+        {
+            using var req = Auth(HttpMethod.Post, $"{endpoint}/register", token, JsonContent.Create(rec, options: Paths.Json));
+            using var res = await Http.SendAsync(req);
+            return (res.IsSuccessStatusCode, $"{(int)res.StatusCode} {res.ReasonPhrase}".Trim());
+        }
+        catch (Exception e) { return (false, e.Message); }
+    }
+
+    public static async Task<List<AgentRecord>?> GetAgents(string endpoint)
+    {
+        try { return await Http.GetFromJsonAsync<List<AgentRecord>>($"{endpoint}/agents", Paths.Json); }
+        catch { return null; }
+    }
+
+    /// <summary>Anti-entropy exchange: send our records, get back the peer's newer/unknown ones to merge.</summary>
+    public static async Task<List<AgentRecord>?> Gossip(string endpoint, string token, List<AgentRecord> records)
+    {
+        try
+        {
+            using var req = Auth(HttpMethod.Post, $"{endpoint}/gossip", token, JsonContent.Create(records, options: Paths.Json));
+            using var res = await Http.SendAsync(req);
+            return res.IsSuccessStatusCode ? await res.Content.ReadFromJsonAsync<List<AgentRecord>>(Paths.Json) : null;
+        }
+        catch { return null; }
+    }
+}

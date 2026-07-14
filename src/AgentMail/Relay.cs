@@ -1,0 +1,151 @@
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
+namespace AgentMail;
+
+/// <summary>
+/// The per-machine relay: `agentmail serve`. Bound to the Tailscale interface only so it is
+/// reachable across the tailnet but not on public interfaces. Bearer-token auth guards the
+/// mutating endpoints (a second factor on top of Tailscale's device auth + encryption).
+/// </summary>
+static class Relay
+{
+    public static async Task<int> Run(Cli cli)
+    {
+        var config = Config.Load();
+        if (cli.Get("port") is { } ps && int.TryParse(ps, out int p)) { config.Port = p; config.Save(); }
+        string token = config.EnsureToken();
+        var ts = Paths.Tailscale;
+
+        // Bind to the tailnet IP when present; otherwise loopback (dev).
+        string bindIp = ts.Ip ?? "127.0.0.1";
+        string url = $"http://{bindIp}:{config.Port}";
+
+        Paths.EnsureRoot();
+
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.SetMinimumLevel(LogLevel.Warning);
+        var app = builder.Build();
+        app.Urls.Add(url);
+
+        // --- auth gate for mutating endpoints ---
+        bool Authorized(HttpRequest req) =>
+            req.Headers.Authorization.ToString() is var h &&
+            h.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) &&
+            CryptoEquals(h["Bearer ".Length..].Trim(), token);
+
+        app.MapGet("/health", () => Results.Text("ok"));
+
+        app.MapGet("/agents", () =>
+            Results.Json(DirectoryStore.All().ToList(), Paths.Json));
+
+        app.MapPost("/inbox", async (HttpRequest req) =>
+        {
+            if (!Authorized(req)) return Results.Unauthorized();
+            Envelope? env;
+            try { env = await System.Text.Json.JsonSerializer.DeserializeAsync<Envelope>(req.Body, Paths.Json); }
+            catch { return Results.BadRequest("invalid envelope"); }
+            if (env is null || string.IsNullOrWhiteSpace(env.To)) return Results.BadRequest("missing 'to'");
+
+            var (name, _) = AgentRef.Split(env.To);
+            // Only deliver to agents registered on this host (name or alias).
+            var target = DirectoryStore.Resolve(name, Paths.Host);
+            if (target is null)
+                return Results.NotFound($"no agent '{name}' on host '{Paths.Host}'");
+
+            if (string.IsNullOrWhiteSpace(env.Id)) env.Id = Guid.NewGuid().ToString("N")[..12];
+            Paths.EnsureAgent(target.Agent);
+            Io.WriteAtomic(Path.Combine(Paths.Inbox(target.Agent), env.FileName), env.Serialize());
+            return Results.Accepted($"/inbox/{env.Id}", new { delivered = env.Id, to = $"{target.Agent}@{Paths.Host}" });
+        });
+
+        app.MapPost("/register", async (HttpRequest req) =>
+        {
+            if (!Authorized(req)) return Results.Unauthorized();
+            AgentRecord? rec;
+            try { rec = await System.Text.Json.JsonSerializer.DeserializeAsync<AgentRecord>(req.Body, Paths.Json); }
+            catch { return Results.BadRequest("invalid record"); }
+            if (rec is null || string.IsNullOrWhiteSpace(rec.Agent) || string.IsNullOrWhiteSpace(rec.Host))
+                return Results.BadRequest("missing agent/host");
+            bool changed = DirectoryStore.Merge(rec);
+            return Results.Json(new { changed, key = rec.Key }, Paths.Json);
+        });
+
+        // Anti-entropy exchange: merge the sender's batch, return records they lack or are stale on.
+        app.MapPost("/gossip", async (HttpRequest req) =>
+        {
+            if (!Authorized(req)) return Results.Unauthorized();
+            List<AgentRecord>? incoming;
+            try { incoming = await System.Text.Json.JsonSerializer.DeserializeAsync<List<AgentRecord>>(req.Body, Paths.Json); }
+            catch { return Results.BadRequest("invalid batch"); }
+            incoming ??= new();
+
+            var byKey = new Dictionary<string, AgentRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in incoming)
+            {
+                if (string.IsNullOrWhiteSpace(r.Agent) || string.IsNullOrWhiteSpace(r.Host)) continue;
+                byKey[r.Key] = r;
+                DirectoryStore.Merge(r);
+            }
+            var reply = new List<AgentRecord>();
+            foreach (var mine in DirectoryStore.All())
+                if (!byKey.TryGetValue(mine.Key, out var theirs) || DirectoryStore.IsNewer(mine, theirs))
+                    reply.Add(mine);
+            return Results.Json(reply, Paths.Json);
+        });
+
+        // Background convergence: periodic anti-entropy with peers, and prune of ancient records.
+        _ = Task.Run(() => GossipLoop(config, token, ts));
+        _ = Task.Run(() => PruneLoop());
+
+        Console.WriteLine($"agentmail relay on {url}  (host={ts.Host}, tailnet={ts.Tailnet ?? "none"})");
+        Console.WriteLine($"  endpoint others use: {ts.EndpointFor(config.Port)}");
+        if (!ts.OnTailnet) Console.WriteLine("  warning: not on a tailnet — bound to loopback only.");
+        await app.RunAsync();
+        return 0;
+    }
+
+    private static int EnvInt(string name, int fallback) =>
+        int.TryParse(Environment.GetEnvironmentVariable(name), out int v) ? v : fallback;
+
+    private static async Task GossipLoop(Config config, string token, TailscaleInfo ts)
+    {
+        int interval = EnvInt("AGENTMAIL_GOSSIP_SECONDS", 20);
+        while (true)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(interval)); } catch { return; }
+            try
+            {
+                var mine = DirectoryStore.All().ToList();
+                foreach (var peer in Gossip.Peers(ts, config))
+                {
+                    var back = await Transport.Gossip(peer, token, mine);
+                    if (back is not null)
+                        foreach (var r in back) DirectoryStore.Merge(r);
+                }
+            }
+            catch { /* a peer being down must not kill the loop */ }
+        }
+    }
+
+    private static async Task PruneLoop()
+    {
+        int hours = EnvInt("AGENTMAIL_PRUNE_HOURS", 24);
+        while (true)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(60)); } catch { return; }
+            try { DirectoryStore.Prune(DateTime.UtcNow.AddHours(-hours)); } catch { }
+        }
+    }
+
+    // Constant-time compare so token check doesn't leak length/prefix via timing.
+    private static bool CryptoEquals(string a, string b)
+    {
+        var ba = System.Text.Encoding.UTF8.GetBytes(a);
+        var bb = System.Text.Encoding.UTF8.GetBytes(b);
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(ba, bb);
+    }
+}

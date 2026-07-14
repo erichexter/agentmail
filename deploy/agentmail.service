@@ -1,0 +1,18 @@
+# AgentMail relay as a systemd user service (Linux peers).
+#   install: cp agentmail.service ~/.config/systemd/user/
+#            systemctl --user enable --now agentmail
+# Ensure the same bearer token as the other machines: set AGENTMAIL_TOKEN below or in config.json.
+[Unit]
+Description=AgentMail relay
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.dotnet/tools/agentmail serve
+Restart=always
+RestartSec=5
+# Environment=AGENTMAIL_TOKEN=<shared-token>
+
+[Install]
+WantedBy=default.target
