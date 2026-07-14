@@ -20,16 +20,18 @@ static class Relay
         string token = config.EnsureToken();
         var ts = Paths.Tailscale;
 
-        // Bind to the tailnet IP when present; otherwise loopback (dev).
-        string bindIp = ts.Ip ?? "127.0.0.1";
-        string url = $"http://{bindIp}:{config.Port}";
+        // Bind to the tailnet IP by default; AGENTMAIL_BIND overrides (comma-separated hosts, e.g.
+        // "0.0.0.0" to also listen on the LAN when the mesh isn't reachable).
+        string[] binds = Environment.GetEnvironmentVariable("AGENTMAIL_BIND") is { Length: > 0 } b
+            ? b.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            : new[] { ts.Ip ?? "127.0.0.1" };
 
         Paths.EnsureRoot();
 
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.SetMinimumLevel(LogLevel.Warning);
         var app = builder.Build();
-        app.Urls.Add(url);
+        foreach (var host in binds) app.Urls.Add($"http://{host}:{config.Port}");
 
         // --- auth gate for mutating endpoints ---
         bool Authorized(HttpRequest req) =>
@@ -101,8 +103,8 @@ static class Relay
         _ = Task.Run(() => GossipLoop(config, token, ts));
         _ = Task.Run(() => PruneLoop());
 
-        Console.WriteLine($"agentmail relay on {url}  (host={ts.Host}, tailnet={ts.Tailnet ?? "none"})");
-        Console.WriteLine($"  endpoint others use: {ts.EndpointFor(config.Port)}");
+        Console.WriteLine($"agentmail relay on {string.Join(", ", binds.Select(h => $"http://{h}:{config.Port}"))}  (host={ts.Host}, tailnet={ts.Tailnet ?? "none"})");
+        Console.WriteLine($"  endpoint others use: {config.EndpointFor(ts)}");
         if (!ts.OnTailnet) Console.WriteLine("  warning: not on a tailnet — bound to loopback only.");
         await app.RunAsync();
         return 0;

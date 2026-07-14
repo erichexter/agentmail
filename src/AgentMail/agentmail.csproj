@@ -13,7 +13,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>agentmail</ToolCommandName>
     <PackageId>AgentMail</PackageId>
-    <Version>0.3.1</Version>
+    <Version>0.3.2</Version>
   </PropertyGroup>
 
   <!-- ASP.NET Core shared framework: used by the `serve` relay (Phase 2). Present with the SDK. -->

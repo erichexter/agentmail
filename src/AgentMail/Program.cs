@@ -45,7 +45,7 @@ static class Program_
         var rec = existing ?? new AgentRecord { Agent = name, Host = Paths.Host };
         rec.User = config.User;
         rec.Tailnet = ts.Tailnet;
-        rec.Endpoint = ts.EndpointFor(config.Port);
+        rec.Endpoint = config.EndpointFor(ts);
         if (cli.Get("alias") is { } aliasCsv)
             rec.Aliases = aliasCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(s => s.ToLowerInvariant()).Distinct().ToList();
