@@ -36,6 +36,21 @@ sealed class Config
     public string EndpointFor(TailscaleInfo ts) =>
         Environment.GetEnvironmentVariable("AGENTMAIL_ENDPOINT") is { Length: > 0 } e ? e : ts.EndpointFor(Port);
 
+    /// <summary>
+    /// Every URL peers can use to reach this node, in try-order: explicit AGENTMAIL_ENDPOINT,
+    /// the Tailscale MagicDNS endpoint, then each LAN IPv4. Auto-discovered — no manual per-machine
+    /// config needed. A sender probes these in order and uses the first that answers.
+    /// </summary>
+    public List<string> EndpointsFor(TailscaleInfo ts)
+    {
+        var list = new List<string>();
+        if (Environment.GetEnvironmentVariable("AGENTMAIL_ENDPOINT") is { Length: > 0 } e) list.Add(e);
+        if (ts.MagicDnsName is { Length: > 0 } dns) list.Add($"http://{dns}:{Port}");
+        foreach (var lan in Net.LanIPv4()) list.Add($"http://{lan}:{Port}");
+        if (list.Count == 0) list.Add(ts.EndpointFor(Port)); // loopback/machine-name fallback
+        return list.Distinct().ToList();
+    }
+
     /// <summary>Generate + persist a token if none is set (unless one is supplied via env). Returns the effective token.</summary>
     public string EnsureToken()
     {

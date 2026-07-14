@@ -12,6 +12,7 @@ sealed class AgentRecord
     public string? Tailnet { get; set; }              // MagicDNS suffix; peers must share it to reach each other
     public string Endpoint { get; set; } = "";
     public List<string> Aliases { get; set; } = new();  // alternate names that route to this agent
+    public List<string> Endpoints { get; set; } = new(); // all reachable relay URLs (tailnet + LAN); sender tries each
     public string Status { get; set; } = "online";   // online | offline (tombstone)
     public long Version { get; set; }                 // bumped on every change; LWW ordering key
     public string LastSeen { get; set; } = "";        // ISO-8601 UTC

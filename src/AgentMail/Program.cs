@@ -45,7 +45,8 @@ static class Program_
         var rec = existing ?? new AgentRecord { Agent = name, Host = Paths.Host };
         rec.User = config.User;
         rec.Tailnet = ts.Tailnet;
-        rec.Endpoint = config.EndpointFor(ts);
+        rec.Endpoints = config.EndpointsFor(ts);
+        rec.Endpoint = rec.Endpoints.FirstOrDefault() ?? config.EndpointFor(ts);
         if (cli.Get("alias") is { } aliasCsv)
             rec.Aliases = aliasCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(s => s.ToLowerInvariant()).Distinct().ToList();
@@ -55,7 +56,8 @@ static class Program_
         DirectoryStore.Save(rec);
 
         string aliasNote = rec.Aliases.Count > 0 ? $", aliases=[{string.Join(",", rec.Aliases)}]" : "";
-        Console.WriteLine($"{(cli.Has("offline") ? "offline" : "registered")}: {rec.Key}  (user={rec.User}, tailnet={rec.Tailnet ?? "none"}{aliasNote}, v{rec.Version})");
+        Console.WriteLine($"{(cli.Has("offline") ? "offline" : "registered")}: {rec.Key}  (user={rec.User}{aliasNote}, v{rec.Version})");
+        Console.WriteLine($"  endpoints: {string.Join(", ", rec.Endpoints)}");
 
         // Optionally announce this record to seed hosts (Phase 2 precursor to full gossip).
         if (cli.Has("push") && config.Seeds.Count > 0)
@@ -101,14 +103,25 @@ static class Program_
         if (!local)
         {
             var config = Config.Load();
-            // Prefer the endpoint from a known directory record; else construct from MagicDNS.
-            string? endpoint = DirectoryStore.Get(toName, toHost!)?.Endpoint;
-            if (endpoint is null)
+            var rec = DirectoryStore.Get(toName, toHost!);
+            // Try every advertised endpoint (tailnet + LAN); use the first that answers a health probe.
+            var candidates = new List<string>();
+            if (rec is not null)
+            {
+                candidates.AddRange(rec.Endpoints);
+                if (candidates.Count == 0 && !string.IsNullOrWhiteSpace(rec.Endpoint)) candidates.Add(rec.Endpoint);
+            }
+            if (candidates.Count == 0)
             {
                 var ts = Paths.Tailscale;
                 string authority = ts.Tailnet is { } suffix ? $"{toHost}.{suffix}" : toHost!;
-                endpoint = $"http://{authority}:{config.Port}";
+                candidates.Add($"http://{authority}:{config.Port}");
             }
+            string? endpoint = null;
+            foreach (var ep in candidates)
+                if (await Transport.Probe(ep)) { endpoint = ep; break; }
+            if (endpoint is null)
+                return Fail($"remote delivery to {to}: no reachable endpoint (tried {string.Join(", ", candidates)})");
             var (ok, detail) = await Transport.SendInbox(endpoint, config.EffectiveToken, env);
             if (!ok) return Fail($"remote delivery to {to} via {endpoint} failed: {detail}");
 

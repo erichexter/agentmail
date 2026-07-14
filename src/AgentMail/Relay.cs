@@ -104,7 +104,7 @@ static class Relay
         _ = Task.Run(() => PruneLoop());
 
         Console.WriteLine($"agentmail relay on {string.Join(", ", binds.Select(h => $"http://{h}:{config.Port}"))}  (host={ts.Host}, tailnet={ts.Tailnet ?? "none"})");
-        Console.WriteLine($"  endpoint others use: {config.EndpointFor(ts)}");
+        Console.WriteLine($"  endpoints others use: {string.Join(", ", config.EndpointsFor(ts))}");
         if (!ts.OnTailnet) Console.WriteLine("  warning: not on a tailnet — bound to loopback only.");
         await app.RunAsync();
         return 0;

@@ -38,6 +38,18 @@ static class Transport
         catch (Exception e) { return (false, e.Message); }
     }
 
+    /// <summary>Quick liveness probe of a relay endpoint (GET /health). Used to pick a reachable address.</summary>
+    public static async Task<bool> Probe(string endpoint, int timeoutMs = 2500)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(timeoutMs);
+            using var res = await Http.GetAsync($"{endpoint}/health", cts.Token);
+            return res.IsSuccessStatusCode;
+        }
+        catch { return false; }
+    }
+
     public static async Task<List<AgentRecord>?> GetAgents(string endpoint)
     {
         try { return await Http.GetFromJsonAsync<List<AgentRecord>>($"{endpoint}/agents", Paths.Json); }
