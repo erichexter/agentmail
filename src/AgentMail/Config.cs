@@ -30,7 +30,7 @@ sealed class Config
 
     /// <summary>
     /// The endpoint peers should use to reach this node. AGENTMAIL_ENDPOINT overrides the
-    /// MagicDNS-derived value — set it to a LAN address (e.g. http://192.168.2.192:8787) when the
+    /// MagicDNS-derived value — set it to a LAN address (e.g. http://LAN-IP:8787) when the
     /// mesh isn't reachable and peers connect over the local network.
     /// </summary>
     public string EndpointFor(TailscaleInfo ts) =>
