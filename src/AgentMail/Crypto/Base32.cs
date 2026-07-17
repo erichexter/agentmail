@@ -1,7 +1,11 @@
 namespace AgentMail.Crypto;
 
 /// <summary>
-/// Crockford base32 (RFC 4648 alphabet minus I, L, O, U), uppercase, unpadded.
+/// Crockford base32 — 0123456789ABCDEFGHJKMNPQRSTVWXYZ — uppercase, unpadded.
+///
+/// Digits-first: 0-9 then A-Z excluding I, L, O, U. This is NOT RFC 4648's alphabet (A-Z then 2-7); deriving
+/// it as "RFC 4648 minus I/L/O/U" gives 28 symbols, not 32, and no digits. The distinction matters because
+/// these characters land in signed bytes.
 ///
 /// Used for two distinct things, both of which land in signed bytes, so the alphabet is part of the wire
 /// contract and vectors pin it:
