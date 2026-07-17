@@ -13,7 +13,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>agentmail</ToolCommandName>
     <PackageId>AgentMail</PackageId>
-    <Version>0.4.0</Version>
+    <Version>0.4.1</Version>
   </PropertyGroup>
 
   <!-- Crypto (E2E). Version PINNED: the FLAG-8 spike validated exactly these against RFC 7748 §6.1
