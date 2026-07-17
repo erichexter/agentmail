@@ -1,5 +1,6 @@
 using AgentMail;
 using AgentMail.Crypto;
+using System.Reflection;
 
 return await Program_.Run(args);
 
@@ -18,6 +19,7 @@ static class Program_
                 "agents" => await Agents(cli),
                 "fetch-keys" => await FetchKeys(cli),
                 "--caps" or "caps" => Caps(),
+                "--version" or "version" => Version(),
                 "serve" => await Relay.Run(cli),
                 "" or "help" or "--help" => Help(),
                 _ => Fail($"unknown verb '{cli.Verb}'. Try `agentmail help`."),
@@ -175,6 +177,19 @@ static class Program_
     static int Caps()
     {
         foreach (var c in Capabilities.All) Console.WriteLine(c);
+        return 0;
+    }
+
+    /// <summary>The tool version. Deploy/rollout tooling greps this to confirm a box carries a given build
+    /// (e.g. >= 0.4.1 for the #8 directory fix) — a restart alone is a no-op on a pinned tool, so "did the
+    /// update take" must be checkable.</summary>
+    static int Version()
+    {
+        var v = System.Reflection.Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(Program_).Assembly.GetName().Version?.ToString() ?? "unknown";
+        // Strip the +<git-sha> build-metadata suffix if present, leaving the clean semver.
+        Console.WriteLine(v.Split('+')[0]);
         return 0;
     }
 
