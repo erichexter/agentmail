@@ -16,6 +16,13 @@
     <Version>0.4.0</Version>
   </PropertyGroup>
 
+  <!-- Crypto (E2E). Version PINNED: the FLAG-8 spike validated exactly these against RFC 7748 §6.1
+       on .NET 10 linux-x64. Geralt pulls libsodium 1.0.22 as a per-RID bundled native, so no
+       libsodium-dev and no P/Invoke are required. Re-run tests/vectors on ANY bump. -->
+  <ItemGroup>
+    <PackageReference Include="Geralt" Version="4.3.0" />
+  </ItemGroup>
+
   <!-- ASP.NET Core shared framework: used by the `serve` relay (Phase 2). Present with the SDK. -->
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
