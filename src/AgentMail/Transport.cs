@@ -27,6 +27,20 @@ static class Transport
         catch (Exception e) { return (false, e.Message); }
     }
 
+    /// <summary>POST a SEALED envelope to a peer's relay. Same /inbox endpoint — the relay detects `enc` and
+    /// routes it through the consume/verify path instead of a plaintext file-drop (activation slice).</summary>
+    public static async Task<(bool ok, string detail)> SendSealed(string endpoint, string token, Crypto.SealedEnvelope env)
+    {
+        try
+        {
+            using var req = Auth(HttpMethod.Post, $"{endpoint}/inbox", token, JsonContent.Create(env, options: Paths.Json));
+            using var res = await Http.SendAsync(req);
+            string detail = await res.Content.ReadAsStringAsync();
+            return (res.IsSuccessStatusCode, $"{(int)res.StatusCode} {res.ReasonPhrase} {detail}".Trim());
+        }
+        catch (Exception e) { return (false, e.Message); }
+    }
+
     public static async Task<(bool ok, string detail)> Register(string endpoint, string token, AgentRecord rec)
     {
         try
