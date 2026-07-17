@@ -1,4 +1,5 @@
 using AgentMail;
+using AgentMail.Crypto;
 
 return await Program_.Run(args);
 
@@ -15,6 +16,7 @@ static class Program_
                 "send" => await Send(cli),
                 "resolve" => Resolve(cli),
                 "agents" => await Agents(cli),
+                "fetch-keys" => await FetchKeys(cli),
                 "serve" => await Relay.Run(cli),
                 "" or "help" or "--help" => Help(),
                 _ => Fail($"unknown verb '{cli.Verb}'. Try `agentmail help`."),
@@ -54,6 +56,15 @@ static class Program_
         rec.LastSeen = NowUtc();
         rec.Version = (existing?.Version ?? 0) + 1;   // every change advances the LWW clock
         DirectoryStore.Save(rec);
+
+        // Publish this agent's identity-only Keys bundle (brief PR1.4) so its home relay can serve GET /keys.
+        // The bundle is the self-signed AgentCertLite; record_epoch tracks the LWW Version so a re-register
+        // advances the published bundle's epoch monotonically, matching the pin store's reject-lower rule.
+        if (!cli.Has("offline"))
+        {
+            var identity = Identity.LoadOrCreate(new Address(name, Paths.Host));
+            KeysBundle.Publish(AgentCertLite.Create(identity, recordEpoch: (ulong)rec.Version));
+        }
 
         string aliasNote = rec.Aliases.Count > 0 ? $", aliases=[{string.Join(",", rec.Aliases)}]" : "";
         Console.WriteLine($"{(cli.Has("offline") ? "offline" : "registered")}: {rec.Key}  (user={rec.User}{aliasNote}, v{rec.Version})");
@@ -152,6 +163,41 @@ static class Program_
 
         Console.WriteLine($"delivered {env.Id} -> {deliverName}@{Paths.Host}  ({Path.Combine(Paths.Inbox(deliverName), env.FileName)})");
         return 0;
+    }
+
+    // fetch-keys --to Y@host --as X   — signed GET /keys, authenticated to X's identity (brief PR1.4)
+    static async Task<int> FetchKeys(Cli cli)
+    {
+        var (toName, toHost) = AgentRef.Split(cli.Require("to"));
+        if (toHost is null) return Fail("fetch-keys needs a fully-qualified --to agent@host");
+        string asName = cli.Get("as") ?? throw new CliError("fetch-keys needs --as <local-agent> to sign the request");
+
+        var requester = Identity.LoadOrCreate(new Address(asName, Paths.Host));
+        var target = new Address(toName, toHost);
+
+        // Resolve the target's relay: an explicit --endpoint wins (operator pointing at a specific relay),
+        // otherwise the advertised endpoints, first that answers — same as send.
+        var config = Config.Load();
+        var rec = DirectoryStore.Get(toName, toHost);
+        var candidates = cli.Get("endpoint") is { } ep0
+            ? new List<string> { ep0 }
+            : rec?.Endpoints.Count > 0 ? new List<string>(rec.Endpoints) : new();
+        if (candidates.Count == 0)
+        {
+            var ts = Paths.Tailscale;
+            candidates.Add($"http://{(ts.Tailnet is { } s ? $"{toHost}.{s}" : toHost)}:{config.Port}");
+        }
+
+        foreach (var ep in candidates)
+        {
+            if (!await Transport.Probe(ep)) continue;
+            var bundle = await Transport.GetKeys(ep, requester, target);
+            if (bundle is null) { Console.Error.WriteLine($"note: {ep} returned no keys for {target.Key} (404 or auth-refused)"); continue; }
+            if (!bundle.VerifySelfSignature()) return Fail($"fetched bundle for {target.Key} FAILED self-signature verification");
+            Console.WriteLine($"{target.Key}\tkey_id={bundle.KeyId}\tkey_epoch={bundle.KeyEpoch}\trecord_epoch={bundle.RecordEpoch}\tvia {ep}");
+            return 0;
+        }
+        return Fail($"fetch-keys {target.Key}: no reachable endpoint served a bundle (tried {string.Join(", ", candidates)})");
     }
 
     // resolve Y   (positional) or resolve --to Y

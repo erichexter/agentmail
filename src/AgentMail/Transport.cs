@@ -38,6 +38,26 @@ static class Transport
         catch (Exception e) { return (false, e.Message); }
     }
 
+    /// <summary>
+    /// Fetch a peer's identity-only Keys bundle (its AgentCertLite) via a SIGNED GET /keys (brief PR1.4).
+    /// The request is authenticated to the fetcher's Ed25519 identity, not the shared bearer token.
+    /// Returns null on 404 (relay doesn't host the target) or any failure — the caller falls back to the
+    /// gossiped record (FLAG-9.3/FLAG-13), it does not treat this as fatal.
+    /// </summary>
+    public static async Task<Crypto.AgentCertLite?> GetKeys(string endpoint, Crypto.Identity requester, Crypto.Address target)
+    {
+        try
+        {
+            var auth = Crypto.KeysFetchAuth.Create(requester, target);
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{endpoint}/keys?to={Uri.EscapeDataString(target.Key)}");
+            req.Headers.Add(Crypto.KeysFetchAuth.HeaderName, auth.ToHeader());
+            using var res = await Http.SendAsync(req);
+            if (!res.IsSuccessStatusCode) return null;
+            return Crypto.KeysBundle.Deserialize(await res.Content.ReadAsStringAsync());
+        }
+        catch { return null; }
+    }
+
     /// <summary>Quick liveness probe of a relay endpoint (GET /health). Used to pick a reachable address.</summary>
     public static async Task<bool> Probe(string endpoint, int timeoutMs = 2500)
     {

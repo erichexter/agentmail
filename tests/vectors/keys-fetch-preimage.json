@@ -1,0 +1,5 @@
+{
+  "_comment": "SignInputKeysFetch = DS_KEYS_FETCH || u8(1) || addr(requester) || addr(target) || field(1,be64(requested_at)). Authenticates a key fetch to the fetcher\u0027s identity, not the shared bearer token. DS_KEYS_FETCH routed to Harrell for App C.",
+  "ds_keys_fetch": "agentmail/v1/keys-fetch",
+  "sign_input_keys_fetch": "01000000176167656e746d61696c2f76312f6b6579732d6665746368010100000006736d696c6579010000000c616365722d6465736b746f70000100000004776f6c6601000000076761746577617900010000000800000198150f9700"
+}

@@ -49,6 +49,13 @@ static class PreImage
     /// vector rename.
     /// </summary>
     public const string DsAgentCertLite = "agentmail/v1/agent-cert-lite";
+    /// <summary>
+    /// Authenticates a GET /keys fetch to the fetching agent's identity, not the shared relay token (brief PR1.4).
+    /// A cross-implementation contract (another agent's fetch must reconstruct these exact bytes), so it is
+    /// domain-separated and vector-pinned. Added to App C's tag namespace alongside DS_AGENTCERT_LITE — Wolf
+    /// routes both to Harrell; a respell is one constant + one vector.
+    /// </summary>
+    public const string DsKeysFetch   = "agentmail/v1/keys-fetch";
     /// <summary>Receipts are signed envelopes, not bare status (FLAG-28). Not in App C's tag list — added by the brief §3.</summary>
     public const string DsReceipt     = "agentmail/v1/receipt";
 
@@ -275,6 +282,26 @@ static class PreImage
         Field(p, true, c.IdentPub);
         FieldBe32(p, c.KeyEpoch);
         FieldBe64(p, c.RecordEpoch);
+        return p.ToArray();
+    }
+
+    /// <summary>
+    /// Pre-image for a signed GET /keys request (brief PR1.4):
+    ///     DS_KEYS_FETCH ‖ u8(1) ‖ addr(requester) ‖ addr(target) ‖ field(1, be64(requested_at))
+    ///
+    /// Signed by the requester's ident_priv and verified against the requester's ident_pub, so a leaked bearer
+    /// token cannot harvest Keys bundles (and, in PR2, cannot drain OPKs). requested_at is the requester's own
+    /// clock; the relay clamps it to a bounded window against ITS clock — a read, so replay is low-harm in PR1,
+    /// but the window keeps a captured request from being replayed indefinitely.
+    /// </summary>
+    public static byte[] SignInputKeysFetch(Address requester, Address target, ulong requestedAt)
+    {
+        using var p = new MemoryStream();
+        Field(p, true, DsKeysFetch);
+        U8(p, VersionByte);
+        Addr(p, requester);
+        Addr(p, target);
+        FieldBe64(p, requestedAt);
         return p.ToArray();
     }
 

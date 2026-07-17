@@ -44,6 +44,28 @@ static class Relay
         app.MapGet("/agents", () =>
             Results.Json(DirectoryStore.All().ToList(), Paths.Json));
 
+        // Signed key distribution (brief PR1.4). Authenticated to the FETCHING agent's Ed25519 identity via the
+        // X-AgentMail-Fetch-Auth header — NOT the shared bearer token — so a leaked token cannot harvest bundles.
+        // Serves only agents THIS relay hosts; a non-local target 404s (FLAG-9.3, non-fatal for the sender).
+        app.MapGet("/keys", (HttpRequest req) =>
+        {
+            string? to = req.Query["to"];
+            if (string.IsNullOrWhiteSpace(to)) return Results.BadRequest("missing ?to=name@host");
+            var (name, host) = AgentRef.Split(to);
+            if (host is null || !string.Equals(host, Paths.Host, StringComparison.OrdinalIgnoreCase))
+                return Results.NotFound($"keys for '{to}' are served by that agent's home relay, not this one");
+
+            var auth = Crypto.KeysFetchAuth.FromHeader(req.Headers[Crypto.KeysFetchAuth.HeaderName]);
+            if (auth is null) return Results.Unauthorized();   // GET /keys requires a signed fetch, not the token
+            string? bad = auth.Verify((ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            if (bad is not null) return Results.Json(new { error = bad }, Paths.Json, statusCode: 401);
+
+            var bundle = Crypto.KeysBundle.Get(new Crypto.Address(name, host));
+            return bundle is null
+                ? Results.NotFound($"no published keys for '{to}'")
+                : Results.Json(bundle, Paths.Json);
+        });
+
         app.MapPost("/inbox", async (HttpRequest req) =>
         {
             if (!Authorized(req)) return Results.Unauthorized();
