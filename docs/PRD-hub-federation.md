@@ -1,6 +1,6 @@
 # AgentMail Hub-Federation — PRD v1 (rev. 6, FINAL)
 
-Status: FINAL v1-rev6 · Owner: Wolf (drafting) → Hex (approve) · Author of system: Harrell/eric-main
+Status: FINAL v1-rev6
 Date: 2026-07-16 · Supersedes: v1-rev5 (round-4 resolution) and the point-to-point direct-delivery design (current production)
 
 ---
@@ -11,7 +11,7 @@ AgentMail is the fleet's async agent-to-agent messaging system, in production to
 
 The design commits to: durable boot-started hub daemons that survive agent restarts; disk-backed queues with durable-before-ack, retry, TTL/hop and `msg_id` dedup; a **binary (Protobuf) federation wire with a JSON agent boundary**; **mandatory transport encryption plus default-on, forward-secret end-to-end payload encryption (X3DH)** built only from vetted primitives; **root-anchored agent identity** via an offline-root → online-intermediate → `AgentCert` PKI so a compromised home hub can neither forge identity nor silently downgrade to plaintext; and **freshness-based health** with corroborated, forward-ack-driven circuit-breaking of misbehaving backbones. All signed objects — the envelope (in two pre-image variants) and every PKI/directory record — use explicit length-prefixed TLV pre-images with no canonicalization and no Unicode normalization, gated by cross-language byte-for-byte test vectors. The signing rule is treated as the single most likely place an exploitable, cross-language bug ships, so bespoke surface is minimized and conformance is proven by vectors, not inspection.
 
-The document is honest about two operational realities. First, the marquee property — **per-agent unforgeability** — is *inoperative intra-box* on today's single-user Git-Bash hosts where any agent can read a sibling's private key; the near-term remediation is **container-per-agent**, and until then boxes run a flagged `same_user_degraded` posture. Second, forward secrecy trades against the at-least-once delivery window: superseded private keys are reference-counted and destroyed early, but a bounded at-rest residual is disclosed rather than claimed away. Migration is zero-downtime and phased (contracts → local daemon → federation+transport → E2E+receipts → optimization → deprecate direct-only), with direct delivery and federation coexisting throughout. Nine open decisions remain for Hex, led by standing up a second backbone host and confirming the container-per-agent isolation rollout.
+The document is honest about two operational realities. First, the marquee property — **per-agent unforgeability** — is *inoperative intra-box* on today's single-user Git-Bash hosts where any agent can read a sibling's private key; the near-term remediation is **container-per-agent**, and until then boxes run a flagged `same_user_degraded` posture. Second, forward secrecy trades against the at-least-once delivery window: superseded private keys are reference-counted and destroyed early, but a bounded at-rest residual is disclosed rather than claimed away. Migration is zero-downtime and phased (contracts → local daemon → federation+transport → E2E+receipts → optimization → deprecate direct-only), with direct delivery and federation coexisting throughout. Nine open decisions remain for the operator, led by standing up a second backbone host and confirming the container-per-agent isolation rollout.
 
 ---
 
@@ -52,14 +52,14 @@ AgentMail is an async agent-messaging system in production today. Each machine r
 
 **The directory propagates fine; delivery does not.** Gossip reaches every peer through any shared neighbor, so agents are *discoverable* everywhere. But direct delivery requires the sender to have *direct IP reachability* to the target hub, and that assumption breaks in production:
 
-- **Cross-tailnet.** Sender on `tailc17728` cannot reach a target on `tailb3cb9`. Observed: gateway could not reach `secondbrain@second-brain` (Azure `10.80.0.4`, tailnet `tailb3cb9`). We hand-relayed through `garrison` (a bridging node on the laptop) to get the message across.
+- **Cross-tailnet.** Sender on `tailnet-1` cannot reach a target on `tailnet-2`. Observed: gateway could not reach `Agent Three@Machine Three` (Azure `10.0.0.4`, tailnet `tailnet-2`). We hand-relayed through `Agent Four` (a bridging node on the laptop) to get the message across.
 - **NAT / corp firewall / ESET.** A constrained host cannot accept inbound connections; the sender's `POST` never lands.
 
 Three additional failure modes proven in production:
 
-- **Silent directory aging.** The `wolf` agent record aged out after 24h because it did not periodically re-register. The relay was up, but the agent was invisible — *relay-up ≠ agent-present*.
+- **Silent directory aging.** The `Agent Two` agent record aged out after 24h because it did not periodically re-register. The relay was up, but the agent was invisible — *relay-up ≠ agent-present*.
 - **Port-open ≠ healthy.** A month-old wedged node held its port; a restart hit `EADDRINUSE`. Liveness was inferred from a bound socket, which lied.
-- **Name collision.** Two agents both claimed `vincent@desktop-bqgtlc4` on one box; delivery `404`'d because the address was ambiguous. (This is a **name-authority / first-writer-wins** problem, not a per-session-key problem — resolved in §6.4/§7.3.)
+- **Name collision.** Two agents both claimed `Agent Ten@Machine Four` on one box; delivery `404`'d because the address was ambiguous. (This is a **name-authority / first-writer-wins** problem, not a per-session-key problem — resolved in §6.4/§7.3.)
 
 This PRD specifies the agreed target design: **federated store-and-forward hubs** with a **persistent-outbound-socket backbone**, a **binary hub-to-hub wire / JSON agent boundary**, **mandatory transport encryption + default-on forward-secret end-to-end payload encryption built from vetted primitives**, and **freshness-based health** — while keeping today's direct delivery working through a phased cutover.
 
@@ -74,7 +74,7 @@ This PRD specifies the agreed target design: **federated store-and-forward hubs*
 - G3. **Reachability by outbound dial**: constrained nodes initiate a long-lived socket to an always-on backbone; replies return over that socket.
 - G4. **Store-and-forward reliability**: disk-backed queues, retry+backoff, TTL/hop-count and message-id dedup, at-least-once with idempotent consume, **durable-before-ack** semantics.
 - G5. **Token-efficient receive**: pointer-not-payload notification; the agent reads the full body only when it decides to act.
-- G6. **Stable identity** that eliminates the `vincent` collision (via name-authority first-writer-wins, §6.4); per-agent auth so a shared local send-port cannot spoof a `from`. **Per-agent unforgeability requires per-agent isolation (container-per-agent preferred, per-OS-user acceptable, §7.4). It is HONESTLY CONCEDED that on the fleet's current single-user Git-Bash boxes G6 holds only cross-box, not intra-box, until isolation lands (§0.1/§7.4, P1-H).** The design does not *claim* intra-box unforgeability it cannot deliver.
+- G6. **Stable identity** that eliminates the `Agent Ten` collision (via name-authority first-writer-wins, §6.4); per-agent auth so a shared local send-port cannot spoof a `from`. **Per-agent unforgeability requires per-agent isolation (container-per-agent preferred, per-OS-user acceptable, §7.4). It is HONESTLY CONCEDED that on the fleet's current single-user Git-Bash boxes G6 holds only cross-box, not intra-box, until isolation lands (§0.1/§7.4, P1-H).** The design does not *claim* intra-box unforgeability it cannot deliver.
 - G7. **Forward-secret end-to-end payload encryption, default-on**, keyed only from **root-anchored** agent identity keys (`AgentCert`, §6.4) plus hub-published prekeys, that fails closed when no authenticated recipient key exists, gives **first-message forward secrecy**, and whose FS-key deletion is reconciled against the at-least-once delivery window so in-flight mail never becomes permanently undecryptable (§6.5/§6.8). **The FS/retention tension is disclosed honestly (§6.5): retention of superseded privates *does* lengthen the at-rest window; we reference-count to delete early and bound the residual, we do not claim it away.**
 - G8. **Freshness-based health**: watchdogs, periodic self-re-register, dead-man's-switch alerts, **and corroborated, forward-ack-driven circuit-breaking of misbehaving backbones (§3.5, P1-F)**.
 - G9. **Zero-downtime migration**: direct delivery and federation coexist; per-leg cutover; a **frozen routing envelope** + integer protocol version + capability negotiation (incl. `max_sig_projection_version`) for mixed-version, mixed-language fleets; **new signed security fields roll out advertise-then-enforce (§4.6/P2-O)**.
@@ -107,7 +107,7 @@ A backbone hub is an ordinary hub with `backbone=true`. Every hub is *both* a lo
  agent(a1)  agent(a2)          agent(sb)
     \         /                    |
    [ Local Hub A ]            [ Backbone Hub Z (Azure) ]════[ Backbone Hub Y (2nd) ]
-   NAT/tailc17728  ── dials out ──►  always-on, tailb3cb9  ◄── dials out ── [ Local Hub B ]
+   NAT/tailnet-1  ── dials out ──►  always-on, tailnet-2  ◄── dials out ── [ Local Hub B ]
                                           ▲   full mesh (════) + link-state          ESET laptop
                                           └─────gossip over the s2s mesh────┘
         [ Intermediate Issuing CA ]  (root-signed; issues HubCert + AgentCert; NOT a relay)
@@ -120,16 +120,16 @@ A backbone hub is an ordinary hub with `backbone=true`. Every hub is *both* a lo
 
 ### 3.3 Message-flow walkthrough (end to end)
 
-Scenario: `wolf@gateway` (NATed) → `secondbrain@second-brain` (Azure). No direct reachability. Backbone Z runs on the Azure box.
+Scenario: `Agent Two@gateway` (NATed) → `Agent Three@Machine Three` (Azure). No direct reachability. Backbone Z runs on the Azure box.
 
-1. **Agent send.** `wolf` writes one JSON line to its local hub's agent-boundary IPC endpoint, authenticated with `wolf`'s per-agent key: `{"to":"secondbrain@second-brain","subject":"...","body":"...","require_e2e":true}`.
-2. **Ingress + envelope mint.** Hub A validates the agent's identity, confirms `from` matches the authenticated agent (rejecting non-LDH/non-NFC-idempotent `name`/`host` — §5.1/P2-K), mints a canonical **Envelope** (§5): assigns `msg_id` (ULID), sets `from=wolf@gateway#<hub-assigned-session>`, `ttl_hops=8`, `created_at`, `expires_at` (clamped ≤ `created_at + MAX_LIFETIME`). It resolves the recipient's **root-anchored** `AgentCert` + home-hub-published prekey `Keys` record and applies **X3DH E2E sealing** (default-on, first-message FS — §6.5) with **`ad = aead_ad_v1(env)`** (the content-hash-free AD variant — §5.3/P0-A). It then computes `content_hash` over the **on-wire body bytes** (ciphertext under E2E), materializes explicit-presence flags, selects `sig_projection_version` (§5.1) subject to per-field floors, and signs `auth.agent_sig` over the **full length-prefixed pre-image** `sign_input_v1(env)` (which includes `content_hash`, `enc.nonce`, `enc.eph_pub` — §5.1/App C). It stamps a **hub ingress attestation** `relay_attest{msg_id, ingress_time, hub_sig}` (§6.6/P0-D), persists the body to the **spool** with fsync, and enqueues. Body persisted + fsync'd **before** the agent gets `ok`.
-3. **Route decision (§7.6).** Hub A resolves `secondbrain@second-brain` → `home_hub = second-brain`, verifying the `hub_record`'s `record_epoch ≥ persisted-highest` (§6.6). It picks a backbone the target is attached to — Z. If it held only Y, it routes to Y; the mesh + link-state guarantees relay (§3.5). Next hop = Z.
+1. **Agent send.** `Agent Two` writes one JSON line to its local hub's agent-boundary IPC endpoint, authenticated with `Agent Two`'s per-agent key: `{"to":"Agent Three@Machine Three","subject":"...","body":"...","require_e2e":true}`.
+2. **Ingress + envelope mint.** Hub A validates the agent's identity, confirms `from` matches the authenticated agent (rejecting non-LDH/non-NFC-idempotent `name`/`host` — §5.1/P2-K), mints a canonical **Envelope** (§5): assigns `msg_id` (ULID), sets `from=Agent Two@gateway#<hub-assigned-session>`, `ttl_hops=8`, `created_at`, `expires_at` (clamped ≤ `created_at + MAX_LIFETIME`). It resolves the recipient's **root-anchored** `AgentCert` + home-hub-published prekey `Keys` record and applies **X3DH E2E sealing** (default-on, first-message FS — §6.5) with **`ad = aead_ad_v1(env)`** (the content-hash-free AD variant — §5.3/P0-A). It then computes `content_hash` over the **on-wire body bytes** (ciphertext under E2E), materializes explicit-presence flags, selects `sig_projection_version` (§5.1) subject to per-field floors, and signs `auth.agent_sig` over the **full length-prefixed pre-image** `sign_input_v1(env)` (which includes `content_hash`, `enc.nonce`, `enc.eph_pub` — §5.1/App C). It stamps a **hub ingress attestation** `relay_attest{msg_id, ingress_time, hub_sig}` (§6.6/P0-D), persists the body to the **spool** with fsync, and enqueues. Body persisted + fsync'd **before** the agent gets `ok`.
+3. **Route decision (§7.6).** Hub A resolves `Agent Three@Machine Three` → `home_hub = Machine Three`, verifying the `hub_record`'s `record_epoch ≥ persisted-highest` (§6.6). It picks a backbone the target is attached to — Z. If it held only Y, it routes to Y; the mesh + link-state guarantees relay (§3.5). Next hop = Z.
 4. **Federation hop (binary, encrypted transport).** Hub A serializes the envelope as a **Protobuf `Frame`** over the **always-encrypted** persistent s2s socket to Z. Ack by `msg_id` only after Z has **durably persisted** it (§8.1); until then it stays on A's disk queue.
 5. **Backbone relay.** Z **validates `auth.agent_sig` + `content_hash` early** (before transcode — §8.5), checks the **persisted dedup set** (applying the per-`msg_id` `ttl_hops` monotonic floor and `ROUTE_TRACE_CAP` — §3.5/P0-C; rate-limiting duplicate `msg_id` injection per source — §8.3), decrements `ttl_hops`, appends `{Z, linkstate_gen}` to `route_trace`, emits a **signed forward-path ack** upstream (`FwdAck`, distinct from the E2E receipt — §3.5/P1-F), and routes per the loop-safe algorithm (§3.5). If Z's downstream link to B is dead, Z consults the **live backbone link-state table**, applies **corroborated circuit-breaker state** (§3.5/P1-F), and re-forwards to a peer backbone advertising a *live, non-demoted* downstream to B (subject to the revisit rule + `ROUTE_TRACE_CAP`), else holds-and-retries B.
-6. **Terminal delivery.** Hub B confirms `secondbrain` is a local agent, **transcodes** to JSON, writes to the inbox via **platform-correct atomic replace** with a reader holding the file open under `FILE_SHARE_DELETE` (§4.5). The inbox-file create and the notify-pointer append are **one `msg_id`-keyed atomic outcome** (§4.5). B acks Z **only after** the flush.
-7. **Pointer signal.** B appends a **newline-terminated** one-line **pointer** to `secondbrain`'s **notify stream** (`notify.jsonl`, §4.3/§4.5). No body. The `Monitor` tolerates a partial trailing line (§4.5).
-8. **Agent read (lazy) + crash-safe consume.** `secondbrain` sees the pointer, reads the inbox file, **verifies `auth.agent_sig` against `wolf@gateway`'s `AgentCert` (root-anchored) and `content_hash` BEFORE decrypting or acting (§6.8)**, applies the signature epoch-gate (accept `superseded` keys only with a valid `relay_attest.ingress_time < superseded_at` within `SUPERSESSION_GRACE`; reject `revoked` — §6.6/P0-D), decrypts (X3DH, AD = `aead_ad_v1(env)`, using retained privates from the reference-counted retention ring — §6.5), performs the **atomic consume transaction** (§6.8), and **caches a re-emittable `consumed` receipt keyed by `msg_id`** (§8.2). Dedup/`.done` short-circuits any duplicate *before* any key op; a duplicate hitting `.done` **re-emits the cached `consumed` receipt** (§8.2).
+6. **Terminal delivery.** Hub B confirms `Agent Three` is a local agent, **transcodes** to JSON, writes to the inbox via **platform-correct atomic replace** with a reader holding the file open under `FILE_SHARE_DELETE` (§4.5). The inbox-file create and the notify-pointer append are **one `msg_id`-keyed atomic outcome** (§4.5). B acks Z **only after** the flush.
+7. **Pointer signal.** B appends a **newline-terminated** one-line **pointer** to `Agent Three`'s **notify stream** (`notify.jsonl`, §4.3/§4.5). No body. The `Monitor` tolerates a partial trailing line (§4.5).
+8. **Agent read (lazy) + crash-safe consume.** `Agent Three` sees the pointer, reads the inbox file, **verifies `auth.agent_sig` against `Agent Two@gateway`'s `AgentCert` (root-anchored) and `content_hash` BEFORE decrypting or acting (§6.8)**, applies the signature epoch-gate (accept `superseded` keys only with a valid `relay_attest.ingress_time < superseded_at` within `SUPERSESSION_GRACE`; reject `revoked` — §6.6/P0-D), decrypts (X3DH, AD = `aead_ad_v1(env)`, using retained privates from the reference-counted retention ring — §6.5), performs the **atomic consume transaction** (§6.8), and **caches a re-emittable `consumed` receipt keyed by `msg_id`** (§8.2). Dedup/`.done` short-circuits any duplicate *before* any key op; a duplicate hitting `.done` **re-emits the cached `consumed` receipt** (§8.2).
 9. **End-to-end receipt.** The terminal hub emits a best-effort hub-signed `Receipt{delivered}` (hint). The **recipient agent** emits an **agent-`ident`-signed `Receipt{consumed}`**; because `consumed` may gate ordering (§8.6), it is **reliably delivered over the multi-backbone mesh with alternate-path failover** (disk-backed, retried, acked — §8.2/P1-I) — **not** best-effort and **not** pinned to a single return hop. Both receipt kinds remain **terminal** (never receipt-tracked, never bounce-on-dead-letter — §8.2). On `consumed` timeout the sender may issue an **authenticated `ConsumedQuery`** (§8.2/P2-L) before retransmitting.
 
 Reply travels the reverse path over the **same** persistent sockets.
@@ -470,7 +470,7 @@ AgentAddr := name "@" host [ "#" session ]
 
 - **The cryptographic identity is `name@host`** (root-anchored via `AgentCert`, §6.4). All live sessions share one identity keypair (§6.5). `#session` distinguishes delivery targets, not crypto principals.
 - **`name`/`host` are LDH/ASCII (new, P2-K).** Restricting identity fields to LDH removes NFC from the signing path (§5.1): two hubs on different ICU/Unicode versions can never produce divergent pre-images for identity fields. Non-conforming input is **rejected at ingress**, never normalized.
-- **`session` is HUB-ASSIGNED.** The home hub assigns the hex session id; an agent cannot mint its own. The original `vincent` collision is fixed by **name-authority first-writer-wins + re-enroll possession-proof** (§6.4/§7.3/P1-7).
+- **`session` is HUB-ASSIGNED.** The home hub assigns the hex session id; an agent cannot mint its own. The original `Agent Ten` collision is fixed by **name-authority first-writer-wins + re-enroll possession-proof** (§6.4/§7.3/P1-7).
 
 ### 7.2 `to` without `#session` — live-instance selection
 
@@ -588,7 +588,7 @@ Exponential backoff + jitter (1s→…→5 min), bounded by `expires_at` (+skew,
 - **Agent liveness beacons** drive live-instance selection (§7.2) + staleness.
 - **Backbone-socket liveness.** App-level `Ping/Pong` (30s; downstream link-state ping 5s). Missed N → mark dead, promote/redial, alert, gossip fresh `bb_linkstate`. **Corroborated, `FwdAck`/probe-driven circuit-breaker state (§3.5/P1-F) is reported in `/peers` per `(backbone,destination)`** with demotion alerts and the **corroboration count** (which/how-many distinct destinations drove a demotion).
 - **Periodic self-re-register** (§7.3).
-- **Dead-man's switch / absence-of-signal** for each expected signal (agent re-register, backbone ping, link-state freshness, `FwdAck`/probe liveness, queue heartbeat, **CRL `next_update` freshness**, **root-pin + intermediate-`IssuerCert` presence**, **authenticated-time sync freshness** — §5.4/P2-J). Telegram only for what Wolf can't self-fix.
+- **Dead-man's switch / absence-of-signal** for each expected signal (agent re-register, backbone ping, link-state freshness, `FwdAck`/probe liveness, queue heartbeat, **CRL `next_update` freshness**, **root-pin + intermediate-`IssuerCert` presence**, **authenticated-time sync freshness** — §5.4/P2-J). Telegram only for what Agent Two can't self-fix.
 - **Authenticated introspection.** `/health`,`/agents`,`/queues`,`/peers` bound to the local admin channel; not unauthenticated over s2s/tailnet. `/agents` reports **isolation posture per box** incl. `same_user_degraded` (§7.4/P1-H). `/peers` reports link-state table + freshness, `backbone_count`, `directory_stale`, **per-destination circuit-breaker demotions + corroboration counts (P1-F)**, and `av_unexcludable` legs (§4.5/P2-P). `/queues` reports depth/oldest-age/byte-usage/dead-letter/quarantine (structural vs processing, below-watermark-unresolvable, agent-side poison, reassembly timeouts, dropped hint-receipts, held-on-unconfirmed-clock counts, sharing-violation stalls).
 - **EADDRINUSE guard.** Multi-probe reap (3×, ≥5s, + grace + no queue-drain). **A pre-existing named pipe fails `FILE_FLAG_FIRST_PIPE_INSTANCE` → squat → alert + refuse, not auto-reap (§7.6).**
 
@@ -606,7 +606,7 @@ Exponential backoff + jitter (1s→…→5 min), bounded by `expires_at` (+skew,
 | T5 | Loops / amplification | Misrouting, directory cycles, receipt loops | **`ROUTE_TRACE_CAP` hard gen-independent bound + per-`msg_id` `ttl_hops` monotonic floor + ingress re-cap (§3.5/§8.4/P0-C)**; persisted `msg_id` dedup (§8.3); receipts/bounces terminal (§8.2). |
 | T6 | Replay / replay-amplification | Re-inject captured envelope at many backbones | Persisted `msg_id` dedup within hard-capped lifetime (§8.3); signed `created_at` + **hub `relay_attest` (§6.6/P0-D)**; persisted highest `record_epoch`/`key_epoch` (§6.6); per-source duplicate-`msg_id` ingress rate-limit + source-socket quarantine (§8.3/§8.5/P2-7). |
 | T7 | Backbone SPOF / DoS / durability / **routing-trust** | Backbone down, flooded, disk-lost, **or lying about link-state / dropping to frame an honest peer** | Full mesh + failover + link-state re-forwarding (§3.5); **corroborated, `FwdAck`/probe-driven circuit-breaking — demotion needs multi-destination corroboration of a FORWARD-attributable signal, never a single confounded end-to-end receipt (§3.5/P1-F)**; **reliable `consumed` mesh-routed with alternate-path failover (§8.2/P1-I)**; residual: bounded transient loss/latency until probes demote a liar; single-backbone + in-flight-durability SPOFs disclosed (`backbone_count`, second-copy-before-ack); quotas + `bulk` shed + priority-agnostic hard eviction (§8.7/P1-1). |
-| T8 | Address squat / directory impersonation | Rogue signs `secondbrain@…` | PKI (root→intermediate→leaf) + name-authority binding + short certs + supersession possession-proof + **freshness-checked CRL with enumerated fail-closed set (§6.4/P1-6)** + **every-record `record_epoch` rollback defense (§6.6/P0-4)**. |
+| T8 | Address squat / directory impersonation | Rogue signs `Agent Three@…` | PKI (root→intermediate→leaf) + name-authority binding + short certs + supersession possession-proof + **freshness-checked CRL with enumerated fail-closed set (§6.4/P1-6)** + **every-record `record_epoch` rollback defense (§6.6/P0-4)**. |
 | T9 | Local access / pipe squat | Another user connects or squats the pipe | `FILE_FLAG_FIRST_PIPE_INSTANCE` + client server-SID verification (§7.6); `0600` UDS in `0700` dir + peer-cred. |
 | T10 | Token/key leakage on disk | Local file exposure | Per-agent keys under per-agent isolation **where provisioned (container-per-agent, §7.4)**; enrollment via operator channel + possession-proof (§7.3); OOB-pinned root + intermediate (§6.4); transport always encrypted; **reference-counted retention limits at-rest blast radius, FS-degradation HONESTLY DISCLOSED (§6.5/P1-5)**. |
 | T11 | Stale/wedged node accepted as healthy | Port held, no progress | Freshness health; multi-probe reaper; squat-not-reap for pipes (§9/§7.6); dead-man switches incl. CRL + link-state + root/intermediate-pin + authenticated-time freshness. |
@@ -637,7 +637,7 @@ Trust boundary summary: **crypto is built from vetted primitives with minimized,
 
 **Phase 4 — Optimization & polish.** Direct-s2s legs, ordering-knob validation, quota tuning, richer `/metrics`, notify-rotation tuning, circuit-breaker + corroboration-threshold tuning. Optional M-of-N root custody.
 
-**Phase 5 — Deprecate direct-only paths.** Once all hubs advertise `federation`, make backbone routing default, direct s2s a pure optimization, remove hand-relay (garrison).
+**Phase 5 — Deprecate direct-only paths.** Once all hubs advertise `federation`, make backbone routing default, direct s2s a pure optimization, remove hand-relay (Agent Four).
 
 Each phase is independently shippable. Backward compat via integer `protocol_version` + capability negotiation (directory-mediated, incl. `max_sig_projection_version` + per-field floors + advertise-then-enforce): direct pairs speak the highest common version; backbones relay any parseable version; the frozen envelope + additive-only evolution (security/routing fields signed in the same change, P2-6) + directory-mediated versioned pre-image + unknown-version nack keep mixed-language, three-party relay safe.
 
@@ -645,7 +645,7 @@ Each phase is independently shippable. Backward compat via integer `protocol_ver
 
 ---
 
-## 12. Open Decisions for Hex
+## 12. Open Decisions for the operator
 
 Security-critical decisions (E2E default, rekey policy, retention-vs-delivery, isolation posture, off-the-shelf-vs-bespoke, **online-intermediate-CA vs offline-only**) are **decided in the body** (§0/§6.0/§6.1/§6.4/§6.5/§7.4). The sharpest still-unresolved trade-offs surfaced by the adversarial rounds are captured below.
 
@@ -859,12 +859,12 @@ message Receipt {                     // TERMINAL (§8.2)
 
 Send (agent → local hub; `require_e2e` fails closed if no `AgentCert`; holds if `AgentCert` present but prekeys withheld):
 ```json
-{"to":"secondbrain@second-brain","subject":"ledger sync","content_type":"text/markdown","require_e2e":true,"seal_subject":true,"body":"…"}
+{"to":"Agent Three@Machine Three","subject":"ledger sync","content_type":"text/markdown","require_e2e":true,"seal_subject":true,"body":"…"}
 ```
 
 Notify pointer (hub → `notify.jsonl`; NEWLINE-TERMINATED; pointer only; subject/thread absent because sealed):
 ```json
-{"msg_id":"01J…","from":"wolf@gateway#3f9c…e21a","size":184,"enc":"enc","key_epoch":3,"ts":1752700000000}
+{"msg_id":"01J…","from":"Agent Two@gateway#3f9c…e21a","size":184,"enc":"enc","key_epoch":3,"ts":1752700000000}
 ```
 
 Notify rotation sentinel:
@@ -876,22 +876,22 @@ Durable inbox file `inbox/1752700000000-01J….msg.json` (full JSON envelope; bo
 
 Bounce receipt to sender (terminal; never itself bounced):
 ```json
-{"receipt":"bounced","msg_id":"01J…","reason":"no live instance (beacon stale)","hub":"second-brain","agent_signed":false,"ts":1752700050000}
+{"receipt":"bounced","msg_id":"01J…","reason":"no live instance (beacon stale)","hub":"Machine Three","agent_signed":false,"ts":1752700050000}
 ```
 
 Agent-signed consumed receipt (E2E proof; mesh-reliably delivered with alternate-path failover, cached for re-emit — P1-2/P1-I):
 ```json
-{"receipt":"consumed","msg_id":"01J…","by":"secondbrain@second-brain#a1b2…","agent_signed":true,"ts":1752700060000}
+{"receipt":"consumed","msg_id":"01J…","by":"Agent Three@Machine Three#a1b2…","agent_signed":true,"ts":1752700060000}
 ```
 
 Ordered-stream failure surfaced to the agent (bounce FAILS THE WHOLE STREAM; no silent reorder — §8.6/P2-M):
 ```json
-{"error":"ordered_stream_failed","from":"wolf@gateway","to":"secondbrain@second-brain","first_unacked_msg_id":"01J…","reason":"ordered_stall","ts":1752700065000}
+{"error":"ordered_stream_failed","from":"Agent Two@gateway","to":"Agent Three@Machine Three","first_unacked_msg_id":"01J…","reason":"ordered_stall","ts":1752700065000}
 ```
 
 Unresolvable-decrypt bounce (epoch below lowest-ever-published watermark → structural, no retry — §8.9/P1-3):
 ```json
-{"receipt":"bounced","msg_id":"01J…","reason":"undecryptable_unresolvable","by_agent":"secondbrain@second-brain","ts":1752700070000}
+{"receipt":"bounced","msg_id":"01J…","reason":"undecryptable_unresolvable","by_agent":"Agent Three@Machine Three","ts":1752700070000}
 ```
 
 Projection-floor-unmet (recipient can't verify a security-critical signed field; only enforceable post advertise-then-enforce — §5.1/P2-4/P2-O):
@@ -1106,4 +1106,4 @@ SK = HKDF( DH(IK_s, spk_pub) || DH(EK, IK_r) || DH(EK, spk_pub) || [DH(EK, opk_p
 - **P1-F / P1-G / P1-H / P1-I** — accepted and fixed (§3.5; §6.4/§7.3; §0.1/§7.4; §8.2/§8.6).
 - **P2-J … P2-P** — accepted and fixed (§5.4/§8.7; §5.1/§7.1; §8.2; §8.6; §6.4; §4.6/§11; §4.5).
 - **Minors** — all fixed: §8.9 contradiction (immediate on verification failure); global reassembly cap (§4.7/§8.7); signed `enc.nonce`/`eph_pub` (§5.1); `spk_sig` binds `ident_pub`+`key_epoch` (§6.5/§5.6).
-- **No round-5 point was judged wrong.** The one *trade* the reviewer flagged (P2-N introduces an online intermediate = a new hot key) is adopted with the residual disclosed (T-INTERMED) and surfaced as OD-8 for Hex to accept or reject in favor of offline-only issuance.
+- **No round-5 point was judged wrong.** The one *trade* the reviewer flagged (P2-N introduces an online intermediate = a new hot key) is adopted with the residual disclosed (T-INTERMED) and surfaced as OD-8 for the operator to accept or reject in favor of offline-only issuance.

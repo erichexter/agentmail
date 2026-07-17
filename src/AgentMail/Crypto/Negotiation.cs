@@ -35,8 +35,8 @@ enum OutboundDecision
 /// propagated, so peers still send plaintext. A naive "e2e agent quarantines all plaintext" would blackhole its
 /// own inbound for the whole propagation window. So ENFORCEMENT is gated on convergence evidence, not on the
 /// flag. This shipped only after the #8 directory fix reached every relay — convergence-gating on a directory
-/// that still flaps would sit on the exact race it defends against. A cleanly PARTITIONED peer (Wolf's
-/// secondbrain caveat) is not that race: it never reflects my advertisement, so post-grace I fail closed
+/// that still flaps would sit on the exact race it defends against. A cleanly PARTITIONED peer (the
+/// isolated-tailnet peer) is not that race: it never reflects my advertisement, so post-grace I fail closed
 /// (quarantine its plaintext) without ever blocking on it.
 /// </summary>
 static class Negotiation

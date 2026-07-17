@@ -43,17 +43,17 @@ static class PreImage
     public const string DsAgentCert   = "agentmail/v1/agent-cert";
     /// <summary>
     /// The PR1 self-signed TOFU pin — a DIFFERENT object from the CA-issued AgentCert, not a reduced form of it.
-    /// Domain-separated on Wolf's ruling (2026-07-17): sharing DS_AGENTCERT with a CA-signed cert would blur the
+    /// Domain-separated by design: sharing DS_AGENTCERT with a CA-signed cert would blur the
     /// object boundary PR3's dual-trust depends on (pin-check vs chain-to-root). App C tag-namespace addition is
-    /// being routed to Harrell as a proposed diff; if he picks a different spelling, this one constant + its
+    /// proposed to the spec as an addition to App C's tag list; if the spelling changes, this one constant + its
     /// vector rename.
     /// </summary>
     public const string DsAgentCertLite = "agentmail/v1/agent-cert-lite";
     /// <summary>
     /// Authenticates a GET /keys fetch to the fetching agent's identity, not the shared relay token (brief PR1.4).
     /// A cross-implementation contract (another agent's fetch must reconstruct these exact bytes), so it is
-    /// domain-separated and vector-pinned. Added to App C's tag namespace alongside DS_AGENTCERT_LITE — Wolf
-    /// routes both to Harrell; a respell is one constant + one vector.
+    /// domain-separated and vector-pinned. Added to App C's tag namespace alongside DS_AGENTCERT_LITE —
+    /// proposed as App C tag additions; a respell is one constant + one vector each.
     /// </summary>
     public const string DsKeysFetch   = "agentmail/v1/keys-fetch";
     /// <summary>Receipts are signed envelopes, not bare status (FLAG-28). Not in App C's tag list — added by the brief §3.</summary>
@@ -215,7 +215,7 @@ static class PreImage
         // NOT mean unwrapped. Every other value in the pre-image is field()-wrapped; an unwrapped content_hash
         // would be the sole exception. Vectors pin one accept and two rejects (unwrapped; hex-string-wrapped).
         // The brief's FLAG-27.1 said the opposite and demanded a reject vector for this, the App C form.
-        // Escalated rather than guessed (49c2b5b851e8); Wolf ruled App C wins and fixed the brief at its site
+        // Resolved in favor of App C (the normative source); the brief was corrected to match
         // (docs @ 903f177, sha 0349bb2a). The losing variant is deleted rather than left behind a flag — a dead
         // branch is how a superseded decision gets rebuilt later.
         Field(p, true, e.ContentHash);
@@ -265,7 +265,7 @@ static class PreImage
     /// Pre-image for the PR1 self-signed TOFU pin (brief PR1.3):
     ///     DS_AGENTCERT_LITE ‖ u8(1) ‖ addr(addr) ‖ field(1, ident_pub) ‖ field(1, be32(key_epoch)) ‖ field(1, be64(record_epoch))
     ///
-    /// This is NOT a reduced App C AgentCert (Wolf's ruling, 2026-07-17). App C's AgentCert is signed by the
+    /// This is NOT a reduced App C AgentCert (by design). App C's AgentCert is signed by the
     /// intermediate CA and carries not_after + issuer_id — CA-issuance fields. A self-signed pin has no CA, no
     /// issuer, and no CA-set expiry, so those fields are ABSENT because they belong to a different object, not
     /// omitted-as-empty-values. That is why it gets its own DS tag rather than sharing DS_AGENTCERT: PR3's

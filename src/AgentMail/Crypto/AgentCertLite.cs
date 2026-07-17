@@ -6,13 +6,13 @@ namespace AgentMail.Crypto;
 /// The PR1 TOFU record: a self-published, agent-signed identity claim (brief PR1.3). No root CA exists in
 /// PR1/PR2 — this record, anchored solely by the first-sight pin, is the entire trust root (FLAG-8d).
 ///
-/// PRE-IMAGE REDUCTION — flagged, not guessed (awaiting Wolf, same posture as the content_hash escalation):
+/// PRE-IMAGE REDUCTION — flagged, not guessed (awaiting maintainer review, same posture as the content_hash escalation):
 /// App C's sign_input_agentcert carries PR3 fields (not_after, issuer_id) and there is no CA to fill them in
 /// PR1. The signed pre-image here is the identity-only subset the brief specifies:
 ///     DS_AGENTCERT || u8(1) || addr(addr) || field(1, ident_pub) || field(1, be32(key_epoch)) || field(1, be64(record_epoch))
 /// i.e. sign_input_agentcert with the two PR3 fields OMITTED (not zero-filled). That omission is a wire choice
 /// a PR3 node must know about to verify a PR1 record, so it is isolated in <see cref="PreImage.SignInputAgentCertLite"/>
-/// and pinned in vectors. If Wolf rules the PR3 fields should be present-but-empty instead, only that method changes.
+/// and pinned in vectors. If the PR3 fields are ruled present-but-empty instead, only that method changes.
 /// </summary>
 sealed class AgentCertLite
 {

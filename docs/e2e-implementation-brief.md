@@ -1,4 +1,4 @@
-# AgentMail E2E Encryption — Buildable Implementation Brief for Smiley (rev 4, post-hostile-review round 3)
+# AgentMail E2E Encryption — Implementation Brief (rev 4)
 
 I have the full accepted design (`PRD-hub-federation.md` rev 6) and the codebase. This is the E2E slice, carved out and layered on the existing HTTP+JSON relay. **This rev folds in every valid finding from ALL THREE hostile-review rounds**; the mapping tables at the end (§12 round-1, §13 round-2, §14 round-3) are the audit trail.
 
@@ -16,7 +16,7 @@ AgentMail today ships plaintext over a cleartext LAN with a single shared bearer
 
 Delivery is in **four incrementally-mergeable PRs** (a stacked dependency chain, *not* four independently-productionizable units): **PR1** identity keys + sealed E2E + signed key distribution + signed receipts + TLV signing foundation; **PR2** async X3DH forward secrecy + at-rest retention encryption; **PR3** the PKI (offline root → intermediate → AgentCert) + revocation + supersession + authenticated-time replay protection — **this is the minimum production-security floor**; **PR4** optional transport TLS as metadata defense-in-depth. All cryptographic authority lives in TLV pre-images gated by committed cross-implementation test vectors, never JSON/protobuf bytes.
 
-The brief has survived **three rounds of hostile review** (60 findings total; every valid one fixed and audited in §§12–14). The residual exposures are real but bounded and enumerated in §9, and the build is **buildable-as-specified** subject to two named gates: the FLAG-1 no-ratchet confirmation (done in the PRD) and the FLAG-8 crypto-library spike (a pass/fail check that Smiley runs first, before any seal code). GO recommendation with conditions in §10.
+The brief has survived **three rounds of hostile review** (60 findings total; every valid one fixed and audited in §§12–14). The residual exposures are real but bounded and enumerated in §9, and the build is **buildable-as-specified** subject to two named gates: the FLAG-1 no-ratchet confirmation (done in the PRD) and the FLAG-8 crypto-library spike (a pass/fail check that Agent One runs first, before any seal code). GO recommendation with conditions in §10.
 
 ## Phased PR roadmap (at a glance — full spec in §4)
 
@@ -33,9 +33,9 @@ Ordering is fixed: PR2 builds on PR1's envelope/pre-images/primitives; PR3 *upgr
 
 ## 0. READ-FIRST FLAGS — resolve or acknowledge before writing code
 
-### FLAG-1 (BLOCKER, needs Hex confirmation): "Double Ratchet" is explicitly REJECTED by the accepted PRD.
+### FLAG-1 (BLOCKER, needs the operator confirmation): "Double Ratchet" is explicitly REJECTED by the accepted PRD.
 Stakeholder decision #1 says "X3DH + **Double Ratchet**." The accepted PRD §6.0/§6.5 **rejects the ratchet**: *"Our delivery is one-shot, unidirectional, store-and-forward, frequently never-answered, with FS-from-message-1 and no ordering dependency… A ratchet adds session-establishment round trips, ordering coupling, and an unbounded skipped-key cache we do not want."* Forward secrecy still comes from X3DH (ephemeral `EK` + one-time prekeys), with **no advancing chain state**.
-- **Recommendation: build the PRD's X3DH-per-message design (no ratchet).** This is the correct call and remains the top escalation. If Hex genuinely wants a ratchet, that is a **new PRD round**, not a silent build.
+- **Recommendation: build the PRD's X3DH-per-message design (no ratchet).** This is the correct call and remains the top escalation. If the operator genuinely wants a ratchet, that is a **new PRD round**, not a silent build.
 - **"Ratchet session state / persistence" answer:** there is **none**. The durable crypto set is §6.8/PRD-line-452: identity/spk/opk privates, the reference-counted superseded-private retention ring, consumed-`opk_id` set, highest-seen epochs, lowest-published watermarks, `.done`/dedup. See §PR2.
 - **FS-scope caveat (B-NEW-4):** "FS from message 1" is **FS for *consumed/retired* keys only, and only against an adversary who does NOT already hold the on-disk private keys.** Because `ident.key`/`spk.key`/`opk/` privates are stored **cleartext on disk** (§5), a disk thief holding them + the public envelope fields recomputes `SK` for **every message currently in the inbox**. Never write "FS from message 1" unqualified anywhere; always pair it with the cleartext-key-on-disk fact. See FLAG-34/§5.
 - **No-ordering corollary (R2-M4):** because there is no chain and no sequence state, the `ordered` capability has **no enforcement mechanism** and MUST NOT be advertised as live — see FLAG-22.
@@ -59,7 +59,7 @@ PR1 implements the **full frozen envelope + both TLV pre-images** but seals with
 PRD Appendix B stores E2E inbox files as `inbox/<ts>-<msgid>.msg.json` (PRD line 875). Current `scripts/watch-inbox.sh` globs `*.msg.md`. **Decision: write `*.msg.json` for enc envelopes; keep `*.msg.md` for legacy plaintext.** The mixed-version delivery-loss hazard this creates is a **blocker-grade deploy constraint** — see **FLAG-9**.
 
 ### FLAG-6 (identity hygiene, PR1): LDH/ASCII at ingress, lowercase `name` at mint.
-`host` is lowercased in `AgentRef.Split`; `name` is not on the send path. §5.1/§7.1/P2-K require `name`,`host` ∈ LDH (`[a-z0-9-]`, no leading/trailing hyphen), **rejected not normalized** otherwise. MagicDNS short names are LDH; machine-name fallback (`DESKTOP-BQGTLC4`) is uppercase → lowercase at mint. Add reject vectors. `#session` unused → ignore for PR1–PR3 (single session/agent), note it. **The pin namespace's authenticity rests on `@host` being authentic — see FLAG-10; the honest position on machine-checkable first-pin is FLAG-11.**
+`host` is lowercased in `AgentRef.Split`; `name` is not on the send path. §5.1/§7.1/P2-K require `name`,`host` ∈ LDH (`[a-z0-9-]`, no leading/trailing hyphen), **rejected not normalized** otherwise. MagicDNS short names are LDH; machine-name fallback (`DESKTOP-EXAMPLE`) is uppercase → lowercase at mint. Add reject vectors. `#session` unused → ignore for PR1–PR3 (single session/agent), note it. **The pin namespace's authenticity rests on `@host` being authentic — see FLAG-10; the honest position on machine-checkable first-pin is FLAG-11.**
 
 ### FLAG-7 (scope): `relay_attest` and the superseded-key window are PR3.
 `relay_attest` is stamped by the **hub** at ingress and is **not** in `sign_input_v1` (§5-table/§5.1). Superseded-key acceptance (§6.6/P0-D, PRD line 636) requires hub attestation ⇒ **PR3**. In PR1/PR2 there is **no superseded grace path** — and, per **FLAG-8b/B3**, no epoch-based auto-supersession of a pin at all. **`relay_attest.ingress_time` is also the ONLY message-intrinsic authenticated time anchor** — which is why durable replay protection for `opk_id=0` messages is PR3-gated (FLAG-33/B-NEW-1). Mixed-fleet relay_attest asymmetry (some hubs pre-PR3, non-attesting) is a disclosed grace hazard — see FLAG-24/R2-M5.
@@ -150,8 +150,8 @@ Extend `Envelope` with §5 fields; keep legacy frontmatter parse/serialize; add 
 {
   "msg_id": "01J...",                 // ULID; dedup keys on (from, msg_id) not msg_id alone
   "protocol_version": 1,
-  "from": {"name":"wolf","host":"gateway"},
-  "to":   {"name":"secondbrain","host":"second-brain"},
+  "from": {"name":"Agent Two","host":"gateway"},
+  "to":   {"name":"Agent Three","host":"Machine Three"},
   "reply_to": null,                   // sender-owned name@host; recipient ENFORCES reply_to.host==from.host (FLAG-45); ONLY genuinely-optional signed field (0x00 legal ONLY here)
   "content_type": "text/markdown",    // registered ASCII allow-list — VERSIONED by protocol_version, NOT node-local (FLAG-44)
   "size": 184,                        // FINAL on-wire body length (POST-padding); SIGNED; fingerprintable unless pad_size_buckets (H1)
@@ -322,7 +322,7 @@ Deliverable: first-message FS (for consumed keys, against a non-disk-holding adv
    - **The retention-ring wrapping key is bound to an OS keyring / TPM** (undoing the §5 "deferred to consider" — this is now **load-bearing, not optional**). It is **NOT** memory-only (survives restart via the keyring/TPM) and **NOT** a plain unencrypted disk file. If no keyring/TPM is available on the box, the node runs in a `retention_wrapkey_unprotected` degraded mode that **alerts** and either (operator choice) keeps the ring unencrypted-with-disclosure or refuses to retain (delivery-window impact).
    - **Scope the claim honestly:** retention-ring encryption **reduces exposure of *superseded/retired* keys only, assuming the wrapping key is externally protected.** It does **NOT** protect **in-flight** messages, because the **live `ident.key`/`spk.key`/`opk/` privates are stored UNENCRYPTED on disk** (§5) — a disk thief holding those + public envelope fields recomputes `SK` for every message currently in the inbox. **Therefore never claim "FS from message 1 against disk theft."** FS holds for **consumed/retired** keys only, against an adversary who does **not** already hold the on-disk live privates.
    - **Also disclose: file-deletion ≠ erasure** — on SSD/CoW the destruction step is `unlink`, which doesn't scrub bytes; the real guarantee is **crypto-erase of the (keyring/TPM-held) wrapping key**, so prefer destroying the wrapping key over relying on file delete.
-   - **Remediation to consider (flag to Hex, not silently omit):** extend keyring/TPM wrapping (or passphrase) to `ident.key`/`spk.key`/`opk/` too — that is the only thing that would extend disk-theft resistance to in-flight messages.
+   - **Remediation to consider (flag to the operator, not silently omit):** extend keyring/TPM wrapping (or passphrase) to `ident.key`/`spk.key`/`opk/` too — that is the only thing that would extend disk-theft resistance to in-flight messages.
 
 OPK exhaustion + fallback (§6.5): pool ≥ 32, home-hub-served only (FLAG-36). Empty/unreachable ⇒ seal `opk_id=0` (`DH1‖DH2‖DH3`). Recipient tracks a **consumed-`opk_id` set (persisted)**; a consumed/unknown OPK ⇒ **spk-only fallback re-derivation first (FLAG-36)**, only then structural undecryptable (`Receipt{bounced, undecryptable_unresolvable}`, **signed**), never a retry loop.
 
@@ -380,7 +380,7 @@ Layout under `~/.claude/agentmail/`: `keys/<name>@<host>/{ident.key, spk.key, op
   - **FLAG-35 (R2-M2 — mlock/secure-alloc failure MUST be surfaced):** an unprivileged agent often hits `RLIMIT_MEMLOCK` (commonly 64 KiB), at which point `mlock`/`sodium_malloc` **silently degrades to normal swappable heap.** **On failure, set a `swap_exposed` degraded flag, surface it in `/agents`, and alert.** Do not pretend the no-swap guarantee holds.
 - **At-rest disclosure (M6 + B-NEW-4 — the live keys are the load-bearing fact):** `ident.key`/`spk.key`/`opk/` are stored **UNENCRYPTED** (no passphrase/OS-keyring wrapping) — **disk theft = full identity + recomputation of `SK` for every message currently in the inbox** (`opk`-backed or not), because a thief with the live privates + the cleartext public envelope fields (`eph_pub`, epochs) reconstructs the DHs. **This is why "FS from message 1 against disk theft" is FALSE and must never be stated — FS holds only for *consumed/retired* keys against a non-disk-holding adversary (FLAG-1/FLAG-34).**
   - **The `retention/` ring IS encrypted at rest (FLAG-34, PR2) under a wrapping key bound to the OS keyring/TPM (externally protected, survives restart, crypto-erasable)** — but this protects **superseded/retired keys only**, not in-flight messages (whose consuming keys are the still-cleartext live privates above). **Disclose file-deletion ≠ erasure** (SSD/CoW): destruction relies on crypto-erasing the wrapping key.
-  - *Remediation to consider (flag to Hex, not silently omit):* keyring/TPM/passphrase-wrap `ident.key`/`spk.key`/`opk/` too — the only path that would extend disk-theft resistance to in-flight messages.
+  - *Remediation to consider (flag to the operator, not silently omit):* keyring/TPM/passphrase-wrap `ident.key`/`spk.key`/`opk/` too — the only path that would extend disk-theft resistance to in-flight messages.
 - **Same-user disclosure (carry forward verbatim):** on single-user boxes all agents share one OS trust domain — **any agent can read a sibling's `ident_priv` and pass its possession-proof; per-agent unforgeability is NOT met intra-box.** Detect at startup → `isolation=same_user_degraded` (surface in `/agents`), logged + alerted. Keys buy **cross-box** unforgeability only until **container-per-agent** (preferred) or per-OS-user isolation lands. **Note this is the same shared-trust-domain collapse that makes multi-agent-per-hub `require_e2e` first-pinning unsound at the network layer (FLAG-11.2) — the two are the same defect at different layers.**
 
 ---
@@ -398,7 +398,7 @@ Layout under `~/.claude/agentmail/`: `keys/<name>@<host>/{ident.key, spk.key, op
 
 ---
 
-## 7. PR checklist (Smiley follows per PR)
+## 7. PR checklist (Agent One follows per PR)
 
 - [ ] Branch `e2e/prN-<slug>` off `main`; scope matches; no cross-PR bleed.
 - [ ] PRD refs cited; FLAG-1 (no ratchet), FLAG-4 (interim seal), FLAG-8/FLAG-21 (library + **named Geralt-raw-X25519 gate** + native-load spike), FLAG-11 (production floor / honest first-pin position) called out where relevant.
@@ -436,13 +436,13 @@ Layout under `~/.claude/agentmail/`: `keys/<name>@<host>/{ident.key, spk.key, op
 - Watcher (probe `--caps`; atomic deploy unit; NO unconditional glob-both): `C:\Users\User\projects\agentmail\scripts\watch-inbox.sh`
 - New: `src/AgentMail/Crypto/Primitives.cs`, `src/AgentMail/Crypto/PreImage.cs`, `tests/` project + `tests/vectors/*.json`.
 
-**Single most important escalation:** get Hex to confirm **FLAG-1** (accepted PRD rejects the Double Ratchet; build X3DH-per-message FS) before PR2. **Second escalation, gates PR1:** the **FLAG-8/FLAG-21 library spike** — now with a **named pass/fail gate "does Geralt expose RAW un-KDF'd X25519?"** (H-NEW-1); if it fails, the libsodium P/Invoke path is primary. KDF is BCL-only; native load on a bare runtime is a gating deliverable. **Third/fourth escalations, gate PR2 and PR3:** **FLAG-31 + FLAG-33/B-NEW-1** (bounded delivery window; `opk_id=0` has no durable replay protection pre-PR3 — pick the unbounded-`.done` policy or `require_opk_for_replay_protection`, and land `relay_attest`-anchored replay in PR3) and **FLAG-29/H-NEW-4** (PR3 dual-trust with an **escapable** ratchet, or PR3 breaks mixed-fleet delivery on rollback). **Fifth, gates require_e2e scope:** **FLAG-11/B-NEW-3** — `require_e2e` pre-PR3 needs a direct-Tailscale `whois`-bound pin under one-agent-per-node, otherwise it requires PR3; there is no machine-checkable first-pin over the gossip/file-drop path. **Sixth, gates the FS claim:** **FLAG-34/B-NEW-4** — the retention wrapping key must be keyring/TPM-bound or the disk-theft claim is void; live keys are cleartext on disk so "FS from message 1" is scoped to consumed keys only.
+**Single most important escalation:** get the operator to confirm **FLAG-1** (accepted PRD rejects the Double Ratchet; build X3DH-per-message FS) before PR2. **Second escalation, gates PR1:** the **FLAG-8/FLAG-21 library spike** — now with a **named pass/fail gate "does Geralt expose RAW un-KDF'd X25519?"** (H-NEW-1); if it fails, the libsodium P/Invoke path is primary. KDF is BCL-only; native load on a bare runtime is a gating deliverable. **Third/fourth escalations, gate PR2 and PR3:** **FLAG-31 + FLAG-33/B-NEW-1** (bounded delivery window; `opk_id=0` has no durable replay protection pre-PR3 — pick the unbounded-`.done` policy or `require_opk_for_replay_protection`, and land `relay_attest`-anchored replay in PR3) and **FLAG-29/H-NEW-4** (PR3 dual-trust with an **escapable** ratchet, or PR3 breaks mixed-fleet delivery on rollback). **Fifth, gates require_e2e scope:** **FLAG-11/B-NEW-3** — `require_e2e` pre-PR3 needs a direct-Tailscale `whois`-bound pin under one-agent-per-node, otherwise it requires PR3; there is no machine-checkable first-pin over the gossip/file-drop path. **Sixth, gates the FS claim:** **FLAG-34/B-NEW-4** — the retention wrapping key must be keyring/TPM-bound or the disk-theft claim is void; live keys are cleartext on disk so "FS from message 1" is scoped to consumed keys only.
 
 ---
 
-## 9. Residual risks Hex must accept (sign-off list)
+## 9. Residual risks the operator must accept (sign-off list)
 
-These are **not bugs to fix** — they are structural limits of the design as specified. Building PR1–PR4 exactly as written still leaves every item below. Hex must explicitly accept them (or fund the named remediation, each of which is a new PRD round, not in scope here).
+These are **not bugs to fix** — they are structural limits of the design as specified. Building PR1–PR4 exactly as written still leaves every item below. the operator must explicitly accept them (or fund the named remediation, each of which is a new PRD round, not in scope here).
 
 1. **Intra-box unforgeability is NOT met (same-user trust-domain collapse).** On a single-user Linux box, every agent runs as the same uid and can read a sibling's `ident.key` and pass its possession-proof. Per-agent unforgeability holds **cross-box only**. The possession of a private key proves "some process on this box," not "this specific agent." *Accepted until container-per-agent or per-OS-user isolation lands (FLAG-11.2/§5). This same defect reappears at the network layer as the multi-agent-per-hub first-pin unsoundness.* **Remediation (out of scope):** container-per-agent isolation.
 
@@ -464,16 +464,16 @@ These are **not bugs to fix** — they are structural limits of the design as sp
 
 ## 10. GO / NO-GO recommendation
 
-**Recommendation: GO — an agent (Smiley) can safely build this as specified, conditional on two named pre-code gates and Hex's sign-off on §9.**
+**Recommendation: GO — an agent (Agent One) can safely build this as specified, conditional on two named pre-code gates and the operator's sign-off on §9.**
 
 **One-line justification:** the design is fully specified down to byte-exact TLV pre-images gated by committed cross-implementation test vectors, every one of 60 hostile-review findings across three rounds is resolved and audited (§§12–14), and the two remaining unknowns are isolated into a single up-front spike — so the residual risk is *disclosure-and-acceptance* (§9), not *unresolved design*.
 
 **GO is conditional on:**
-- **Gate A (blocks PR2, already satisfiable by Hex now):** confirm **FLAG-1** — the accepted PRD rejects the Double Ratchet; Smiley builds X3DH-per-message FS. A silent ratchet build would be wrong.
+- **Gate A (blocks PR2, already satisfiable by the operator now):** confirm **FLAG-1** — the accepted PRD rejects the Double Ratchet; Agent One builds X3DH-per-message FS. A silent ratchet build would be wrong.
 - **Gate B (blocks all seal code in PR1):** the **FLAG-8/FLAG-21 crypto spike** ran first and its named outcome is recorded: **PASS** ("Geralt exposes raw un-KDF'd X25519" — confirmed). **Geralt is the DH/AEAD/Ed25519/conversion primary; NO P/Invoke;** the no-`libsodium-dev` load-smoke test still gates CI to keep the bundled native from regressing. The KDF is BCL HKDF-SHA256 unconditionally. Seal code proceeds in PR1.
-- **Sign-off:** Hex explicitly accepts the eight residual risks in §9 (especially #1 intra-box unforgeability, #2 metadata linkability, #3 the at-rest FS window), and acknowledges **PR3 is the minimum production-security floor** — PR1/PR2 are delivery-safe resting points only.
+- **Sign-off:** the operator explicitly accepts the eight residual risks in §9 (especially #1 intra-box unforgeability, #2 metadata linkability, #3 the at-rest FS window), and acknowledges **PR3 is the minimum production-security floor** — PR1/PR2 are delivery-safe resting points only.
 
-**Why not NO-GO:** nothing in the brief is under-specified or self-contradictory after round 3; the hazards that would make an agent build the wrong thing (ratchet vs no-ratchet, Geralt-raw assumption, opaque KDF substitution, opk-gossip message loss, one-way PKI ratchet breaking rollback) are each named, gated, and vector-tested. An agent following §7's per-PR checklist cannot silently ship any of the disqualifying defects. The only way this becomes NO-GO is if Hex declines to accept §9's residual risks or wants a Double Ratchet — either of which is a new PRD round, not a build.
+**Why not NO-GO:** nothing in the brief is under-specified or self-contradictory after round 3; the hazards that would make an agent build the wrong thing (ratchet vs no-ratchet, Geralt-raw assumption, opaque KDF substitution, opk-gossip message loss, one-way PKI ratchet breaking rollback) are each named, gated, and vector-tested. An agent following §7's per-PR checklist cannot silently ship any of the disqualifying defects. The only way this becomes NO-GO is if the operator declines to accept §9's residual risks or wants a Double Ratchet — either of which is a new PRD round, not a build.
 
 ---
 
@@ -509,7 +509,7 @@ These are **not bugs to fix** — they are structural limits of the design as sp
 
 
 ---
-# FLAG-8 SPIKE RESULT (LOCKED 2026-07-16) — reviewed + approved by wolf (driver)
+# FLAG-8 SPIKE RESULT (LOCKED 2026-07-16) — reviewed + approved by Agent Two (driver)
 GATE: PASS (13/13, RFC-7748 s6.1 known-answer verified — Geralt.X25519.ComputeSharedSecret is raw
 crypto_scalarmult, matches vector 4a5d9d5b...161742; a KDF'd output cannot reproduce this).
 

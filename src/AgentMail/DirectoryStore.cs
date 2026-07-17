@@ -125,7 +125,7 @@ static class DirectoryStore
     ///
     /// A LOCALLY-HOSTED record is NEVER stale, whatever its last_seen says. A relay always knows which agents
     /// it hosts; `Resolve(name, Paths.Host)` failing for a local agent is incoherent by construction, and is
-    /// exactly what took wolf@windev2407eval offline on 2026-07-17 — his own relay 404'd him at 24.2h.
+    /// exactly the incident this replaces: an agent's own relay 404'd it once its record aged past the prune window.
     ///
     /// Freshness — not <see cref="AgentRecord.Status"/> — is the signal. Status is self-asserted at register
     /// and never refreshed, so it cannot go false; four agents were reporting "online" while unroutable.

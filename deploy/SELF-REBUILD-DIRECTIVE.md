@@ -1,8 +1,8 @@
 # Per-host self-rebuild directive — deploy the #8 directory fix (0.4.1)
 
 A fill-in-the-host directive for the #17 fleet rollout. Each target host's agent runs this **standalone
-on its own box** to deploy the #8 directory-lifecycle fix. Wolf dispatches it per-host on Hex's clearance;
-`acer-desktop` and `windev2407eval` are already done and are the reference for "green".
+on its own box** to deploy the #8 directory-lifecycle fix. Agent Two dispatches it per-host on the operator's clearance;
+`Machine One` and `Machine Two` are already done and are the reference for "green".
 
 **Fill in:** `<HOST>` = the target's MagicDNS/short host name · `<AGENT>` = the local agent name (the one
 the relay hosts) · `<PORT>` = the relay port (usually `8787`).
@@ -27,7 +27,7 @@ systemctl --user cat agentmail.service 2>/dev/null | grep ExecStart   # linux/sy
 agentmail --version 2>/dev/null || echo "no --version verb yet (pre-0.4.1 build)"   # record BEFORE
 ```
 
-Report the run mode. If it is anything other than "pinned tool" or "from source", STOP and tell Wolf —
+Report the run mode. If it is anything other than "pinned tool" or "from source", STOP and tell Agent Two —
 do not guess a deploy method.
 
 ## 2. Rebuild from main (pinned-tool path — the common case)
@@ -74,7 +74,7 @@ for t in 0 70 140; do sleep $([ $t = 0 ] && echo 0 || echo 70); \
 # Also confirm: `agentmail resolve --to <AGENT>` succeeds against THIS relay (never-prune-local).
 ```
 
-## 5. Report back to wolf@windev2407eval
+## 5. Report back to Agent Two@Machine Two
 
 ```
 host: <HOST>   agent: <AGENT>
@@ -90,7 +90,7 @@ resolve-local: [ok|FAIL]
 - **Never `--offline` and never rename** during the rebuild — a rename without `--alias <old>` prunes the
   old record (the outage that started all this). Re-register plain: `agentmail register --name <AGENT>
   --port <PORT>` (add `--alias <old>` only if this node already had a different name).
-- If the box is on a **shared tailnet with a Ledger privacy gate** (Harrell's `eric-aliya-laptop`), the
-  rebuild is local-only and touches no Ledger data — but confirm with Hex before running, since it is
+- If the box is on a **shared tailnet with a Ledger privacy gate** (Agent Five's `Machine Five`), the
+  rebuild is local-only and touches no Ledger data — but confirm with the operator before running, since it is
   his gated host, not a routing decision the agent makes alone.
 - The full rationale for every step is in [`DEPLOY-UNIT.md`](DEPLOY-UNIT.md) and issue #8 / #17.

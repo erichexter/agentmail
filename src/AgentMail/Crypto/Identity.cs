@@ -12,7 +12,7 @@ namespace AgentMail.Crypto;
 /// So forward secrecy covers CONSUMED/RETIRED keys only, against an adversary who does not already hold these
 /// bytes — never claim "FS from message 1" unqualified. POSIX perms also buy nothing against a same-uid
 /// sibling process: siblings share the uid. Extending keyring/TPM wrapping to ident.key is the only thing
-/// that would push disk-theft resistance to in-flight messages; flagged for Hex, not silently omitted.
+/// that would push disk-theft resistance to in-flight messages (a planned hardening, disclosed not omitted).
 /// </summary>
 sealed class Identity
 {
@@ -41,7 +41,7 @@ sealed class Identity
     public static Identity LoadOrCreate(Address address)
     {
         // Reject non-conforming identity text here rather than normalizing it (P2-K). Lowercasing is a MINT
-        // concern: a machine-name fallback like DESKTOP-BQGTLC4 must be lowercased before it reaches this
+        // concern: a machine-name fallback like DESKTOP-EXAMPLE must be lowercased before it reaches this
         // point, never silently folded afterwards.
         PreImage.AssertLdh(address.Name, "name");
         PreImage.AssertLdh(address.Host, "host");
