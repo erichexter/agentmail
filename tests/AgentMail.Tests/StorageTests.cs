@@ -84,6 +84,17 @@ public class StorageTests
     }
 
     [Fact]
+    public void The_assembly_reports_a_clean_semver_that_deploy_tooling_can_grep()
+    {
+        // `agentmail --version` must emit a clean semver (no +git-sha suffix) so the rollout can check
+        // "is this box >= 0.4.1" — a restart alone is a no-op on a pinned tool, so version is the only
+        // proof the update took. This pins the format the SELF-REBUILD-DIRECTIVE greps.
+        var v = typeof(AgentMail.Paths).Assembly.GetName().Version;
+        Assert.NotNull(v);
+        Assert.True(v!.Major > 0 || v.Minor >= 4, $"assembly version {v} should be >= 0.4");
+    }
+
+    [Fact]
     public void An_enc_envelope_serializes_to_msg_json_and_legacy_to_msg_md()
     {
         // FLAG-5: enc envelopes go to *.msg.json, legacy plaintext stays *.msg.md. The two names are kept
