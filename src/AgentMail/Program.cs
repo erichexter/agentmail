@@ -166,8 +166,15 @@ static class Program_
         if (matches.Count == 0) { Console.WriteLine($"no record for '{target}'"); return 1; }
         foreach (var m in matches)
         {
-            bool isLocal = m.Host == Paths.Host;
-            Console.WriteLine($"{m.Key}\t{m.Status}\t{(isLocal ? "local" : "remote")}\t{m.Endpoint}\tinbox={Paths.Inbox(m.Agent)}");
+            bool isLocal = DirectoryStore.IsLocal(m);
+            bool stale = DirectoryStore.IsStale(m);
+            // Report FRESHNESS, not Status. Status is self-asserted at register and never goes false, so
+            // printing it alone told operators "online" about agents unroutable for 37h (#8).
+            Console.WriteLine($"{m.Key}\t{(stale ? "STALE" : m.Status)}\t{(isLocal ? "local" : "remote")}\t{m.Endpoint}\tinbox={Paths.Inbox(m.Agent)}");
+            if (stale)
+                Console.Error.WriteLine(
+                    $"note: {m.Key} last_seen {m.LastSeen} (older than {DirectoryStore.StaleAfter.TotalHours:0}h) — " +
+                    $"its record still says '{m.Status}', but that field is never refreshed. Not trusted for routing.");
         }
         return 0;
     }
@@ -191,9 +198,23 @@ static class Program_
 
         all = all.OrderBy(r => r.Key, StringComparer.OrdinalIgnoreCase).ToList();
         if (all.Count == 0) { Console.WriteLine("(no agents)"); return 0; }
-        Console.WriteLine($"{"AGENT@HOST",-30} {"USER",-12} {"STATUS",-8} {"VER",-5} LAST_SEEN");
+        // AGE is computed from last_seen and is the real signal; STATUS is self-asserted at register and never
+        // refreshed, so it stays "online" forever. Showing them side by side makes the divergence visible
+        // instead of letting an operator read "online" off a record that has been unroutable for 37h (#8).
+        var now = DateTime.UtcNow;
+        Console.WriteLine($"{"AGENT@HOST",-30} {"USER",-12} {"STATUS",-8} {"AGE",-9} {"VER",-5} LAST_SEEN");
         foreach (var r in all)
-            Console.WriteLine($"{r.Key,-30} {r.User,-12} {r.Status,-8} v{r.Version,-4} {r.LastSeen}");
+        {
+            string age = DirectoryStore.TryParseLastSeen(r, out var seen)
+                ? $"{(now - seen).TotalHours,6:0.0}h" + (DirectoryStore.IsStale(r, now) ? "!" : " ")
+                : "    ?  ";
+            Console.WriteLine($"{r.Key,-30} {r.User,-12} {r.Status,-8} {age,-9} v{r.Version,-4} {r.LastSeen}");
+        }
+        int stale = all.Count(r => DirectoryStore.IsStale(r, now));
+        if (stale > 0)
+            Console.Error.WriteLine(
+                $"note: {stale} of {all.Count} record(s) are STALE (marked !) — last_seen older than " +
+                $"{DirectoryStore.StaleAfter.TotalHours:0}h. They are NOT trusted for routing regardless of STATUS.");
         return 0;
     }
 

@@ -99,9 +99,14 @@ static class Relay
             return Results.Json(reply, Paths.Json);
         });
 
-        // Background convergence: periodic anti-entropy with peers, and prune of ancient records.
+        // Background convergence: periodic anti-entropy with peers.
+        //
+        // The prune loop that used to run here is GONE (#8). It deleted any record older than 24h every 60s,
+        // which fought gossip: prune removed the file, a peer gossiped it back, prune removed it again — so a
+        // live agent's inbound alternated 202/404 on a ~60s cycle with neither end told. It also 404'd agents
+        // out of their OWN relay. Records are no longer auto-deleted; staleness is computed at read time
+        // (DirectoryStore.IsStale) and gates routing instead. Reaping is explicit: DirectoryStore.PruneExplicit.
         _ = Task.Run(() => GossipLoop(config, token, ts));
-        _ = Task.Run(() => PruneLoop());
 
         Console.WriteLine($"agentmail relay on {string.Join(", ", binds.Select(h => $"http://{h}:{config.Port}"))}  (host={ts.Host}, tailnet={ts.Tailnet ?? "none"})");
         Console.WriteLine($"  endpoints others use: {string.Join(", ", config.EndpointsFor(ts))}");
@@ -133,15 +138,10 @@ static class Relay
         }
     }
 
-    private static async Task PruneLoop()
-    {
-        int hours = EnvInt("AGENTMAIL_PRUNE_HOURS", 24);
-        while (true)
-        {
-            try { await Task.Delay(TimeSpan.FromSeconds(60)); } catch { return; }
-            try { DirectoryStore.Prune(DateTime.UtcNow.AddHours(-hours)); } catch { }
-        }
-    }
+    // PruneLoop deleted (#8) — do not reintroduce it. AGENTMAIL_PRUNE_HOURS is likewise gone; the equivalent
+    // knob is AGENTMAIL_STALE_HOURS, which controls when a record stops being TRUSTED, not when it is erased.
+    // Automatic deletion cannot coexist with LWW gossip: a delete is indistinguishable from "never seen", so
+    // any peer holding the record replays it straight back.
 
     // Constant-time compare so token check doesn't leak length/prefix via timing.
     private static bool CryptoEquals(string a, string b)
