@@ -82,6 +82,24 @@ static class Relay
 
             if (string.IsNullOrWhiteSpace(env.Id)) env.Id = Guid.NewGuid().ToString("N")[..12];
             Paths.EnsureAgent(target.Agent);
+
+            // FLAG-32/38 — this endpoint carries LEGACY PLAINTEXT (enc envelopes are *.msg.json). If the local
+            // recipient is an e2e agent, an e2e peer sending plaintext must be gated. Convergence-safe: a peer
+            // that hasn't yet learned the recipient does e2e is accepted-with-alert, not blackholed. Enforcement
+            // is meaningful only now that the #8 directory fix is fleet-wide — a flapping directory here would
+            // be the exact FLAG-38 race.
+            var decision = CapabilityGate.InboundPlaintext(target, env.From, ulongNow());
+            if (decision == Crypto.InboundDecision.Quarantine)
+            {
+                string qdir = Path.Combine(Paths.AgentDir(target.Agent), "quarantine");
+                Directory.CreateDirectory(qdir);
+                Io.WriteAtomic(Path.Combine(qdir, env.FileName), env.Serialize());
+                Console.Error.WriteLine($"alert: quarantined plaintext {env.Id} for e2e agent {target.Agent} from e2e peer {env.From} (should have sealed)");
+                return Results.Accepted($"/quarantine/{env.Id}", new { quarantined = env.Id, reason = "e2e-peer-sent-plaintext" });
+            }
+            if (decision == Crypto.InboundDecision.DeliverWithAlert)
+                Console.Error.WriteLine($"alert: delivered plaintext {env.Id} to e2e agent {target.Agent} from {env.From} during convergence window (peer not yet converged)");
+
             Io.WriteAtomic(Path.Combine(Paths.Inbox(target.Agent), env.FileName), env.Serialize());
             return Results.Accepted($"/inbox/{env.Id}", new { delivered = env.Id, to = $"{target.Agent}@{Paths.Host}" });
         });
@@ -164,6 +182,8 @@ static class Relay
     // knob is AGENTMAIL_STALE_HOURS, which controls when a record stops being TRUSTED, not when it is erased.
     // Automatic deletion cannot coexist with LWW gossip: a delete is indistinguishable from "never seen", so
     // any peer holding the record replays it straight back.
+
+    static ulong ulongNow() => (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     // Constant-time compare so token check doesn't leak length/prefix via timing.
     private static bool CryptoEquals(string a, string b)

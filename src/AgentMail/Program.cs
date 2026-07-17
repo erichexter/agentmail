@@ -56,6 +56,10 @@ static class Program_
             rec.Aliases = aliasCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(s => s.ToLowerInvariant()).Distinct().ToList();
         rec.Status = cli.Has("offline") ? "offline" : "online";
+        // Advertise the network-facing capabilities so peers can negotiate (FLAG-9.2/FLAG-32). Publishing `e2e`
+        // means "this node reads *.msg.json AND will treat inbound plaintext from other e2e peers under the
+        // FLAG-32 rules". An operator can suppress it with --no-e2e to stay a legacy plaintext node.
+        rec.Capabilities = cli.Has("no-e2e") ? new List<string>() : new List<string>(Capabilities.All);
         rec.LastSeen = NowUtc();
         rec.Version = (existing?.Version ?? 0) + 1;   // every change advances the LWW clock
         DirectoryStore.Save(rec);
