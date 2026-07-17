@@ -17,6 +17,7 @@ static class Program_
                 "resolve" => Resolve(cli),
                 "agents" => await Agents(cli),
                 "fetch-keys" => await FetchKeys(cli),
+                "--caps" or "caps" => Caps(),
                 "serve" => await Relay.Run(cli),
                 "" or "help" or "--help" => Help(),
                 _ => Fail($"unknown verb '{cli.Verb}'. Try `agentmail help`."),
@@ -162,6 +163,18 @@ static class Program_
         }
 
         Console.WriteLine($"delivered {env.Id} -> {deliverName}@{Paths.Host}  ({Path.Combine(Paths.Inbox(deliverName), env.FileName)})");
+        return 0;
+    }
+
+    /// <summary>
+    /// Capabilities THIS binary supports, one per line. The watcher probes this before globbing *.msg.json
+    /// (FLAG-9.4): a binary that prints `msg-json` can parse enc envelopes, so pairing it with a watcher that
+    /// feeds it json is safe. A legacy binary lacks the verb entirely, so the watcher stays *.msg.md-only —
+    /// which is what keeps the binary + watcher an atomic per-node deploy unit (FLAG-9.1), never a split.
+    /// </summary>
+    static int Caps()
+    {
+        foreach (var c in Capabilities.All) Console.WriteLine(c);
         return 0;
     }
 
