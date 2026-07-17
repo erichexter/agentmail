@@ -172,8 +172,8 @@ static class PreImage
     /// sign_input_v1(env) — the full pre-image: aead_ad's structure plus content_hash at its fixed slot,
     /// between size and created_at. Signed as Ed25519(ident_priv, DS_AUTH ‖ sign_input_v1).
     ///
-    /// See <see cref="ContentHashIsFieldWrapped"/>: the encoding of the content_hash slot is contested between
-    /// App C and FLAG-27.1 and is awaiting a ruling. Everything else here is unambiguous.
+    /// The content_hash slot is field()-wrapped per App C line 997 — ruled 2026-07-16 over the brief's earlier
+    /// FLAG-27.1 text; see the comment at that slot below.
     /// </summary>
     public static byte[] SignInputV1(SealedEnvelope e)
     {
