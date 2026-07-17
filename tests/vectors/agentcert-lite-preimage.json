@@ -1,0 +1,5 @@
+{
+  "_comment": "PR1 TOFU record (brief PR1.3). sign_input_agentcert reduced to identity-only: DS_AGENTCERT || u8(1) || addr || field(1,ident_pub) || field(1,be32(key_epoch)) || field(1,be64(record_epoch)). not_after/issuer_id OMITTED (PR3). Flagged to Wolf.",
+  "ds_agent_cert": "agentmail/v1/agent-cert",
+  "sign_input_agentcert_lite": "01000000176167656e746d61696c2f76312f6167656e742d63657274010100000004776f6c66010000000767617465776179000100000020c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf01000000040000000301000000080000000000000007"
+}

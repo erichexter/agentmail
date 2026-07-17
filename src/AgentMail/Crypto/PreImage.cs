@@ -39,6 +39,7 @@ static class PreImage
     public const string DsAuthPrefix  = "agentmail/v1/preimage";
     public const string DsAeadPrefix  = "agentmail/v1/aead-ad";
     public const string DsKeys        = "agentmail/v1/keys";
+    public const string DsAgentCert   = "agentmail/v1/agent-cert";
     /// <summary>Receipts are signed envelopes, not bare status (FLAG-28). Not in App C's tag list — added by the brief §3.</summary>
     public const string DsReceipt     = "agentmail/v1/receipt";
 
@@ -241,6 +242,28 @@ static class PreImage
         Be64(p, receiptTime);
         Addr(p, recipient);
         Addr(p, sender);
+        return p.ToArray();
+    }
+
+    /// <summary>
+    /// sign_input_agentcert reduced to the PR1 identity-only fields (brief PR1.3):
+    ///     DS_AGENTCERT ‖ u8(1) ‖ addr(addr) ‖ field(1, ident_pub) ‖ field(1, be32(key_epoch)) ‖ field(1, be64(record_epoch))
+    ///
+    /// App C's full sign_input_agentcert also carries not_after and issuer_id, which are PR3/PKI concepts with
+    /// no value in PR1 (no CA exists). They are OMITTED here, not zero-filled — a PR3 verifier must know a PR1
+    /// record is the short form. That reduction is a wire choice; it is isolated in this one method and pinned
+    /// in vectors, and flagged to Wolf for a ruling exactly like the content_hash encoding was. If he rules the
+    /// PR3 fields should be present-but-empty, only this method changes.
+    /// </summary>
+    public static byte[] SignInputAgentCertLite(AgentCertLite c)
+    {
+        using var p = new MemoryStream();
+        Field(p, true, DsAgentCert);
+        U8(p, VersionByte);
+        Addr(p, c.Addr);
+        Field(p, true, c.IdentPub);
+        FieldBe32(p, c.KeyEpoch);
+        FieldBe64(p, c.RecordEpoch);
         return p.ToArray();
     }
 

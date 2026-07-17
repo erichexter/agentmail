@@ -123,6 +123,31 @@ public class VectorTests
     }
 
     [Fact]
+    public void AgentCertLite_pre_image_matches_the_committed_vector()
+    {
+        // The PR1 TOFU record. Identity-only reduction of App C's sign_input_agentcert (not_after/issuer_id
+        // OMITTED — PR3 fields with no CA in PR1). Flagged to Wolf; pinned here so a reimplementation matches.
+        var record = new AgentCertLite
+        {
+            Addr = new Address("wolf", "gateway"),
+            IdentPub = Enumerable.Range(0, 32).Select(i => (byte)(0xC0 + i)).ToArray(),
+            KeyEpoch = 3,
+            RecordEpoch = 7,
+        };
+
+        var actual = new JsonObject
+        {
+            ["_comment"] = "PR1 TOFU record (brief PR1.3). sign_input_agentcert reduced to identity-only: "
+                         + "DS_AGENTCERT || u8(1) || addr || field(1,ident_pub) || field(1,be32(key_epoch)) || "
+                         + "field(1,be64(record_epoch)). not_after/issuer_id OMITTED (PR3). Flagged to Wolf.",
+            ["ds_agent_cert"] = PreImage.DsAgentCert,
+            ["sign_input_agentcert_lite"] = Hex(PreImage.SignInputAgentCertLite(record)),
+        };
+
+        AssertMatchesVector("agentcert-lite-preimage.json", actual);
+    }
+
+    [Fact]
     public void Receipt_pre_image_matches_the_committed_vector()
     {
         var actual = new JsonObject
