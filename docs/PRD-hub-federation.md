@@ -930,6 +930,34 @@ field(present, bytes) := present ? (u8(0x01) || be32(len(bytes)) || bytes) : (u8
 rep(items, enc_elem)  := be32(len(items)) || concat(enc_elem(items[i]) for i in 0..len-1)   # order is signed; verifier does NOT reorder
 addr(a)   := field(1, ascii(a.name)) || field(1, ascii(a.host)) || field(a.session?, ascii(a.session))
 
+# --- Fixed-width enum wire values + fingerprint encoding (normative; pinned by the Phase-0 vectors) ---
+# These are signed bytes: enc.mode/priority ride in be32 fields of both pre-images, receipt_type is a u8 in
+# receipt_v1, and *_key_id/msg_id are ascii() inside the pre-image. An implementation that guesses a different
+# value or alphabet produces a different pre-image and every cross-implementation signature fails, so the
+# concrete values are stated here rather than left to each binding.
+EncMode      := { PLAINTEXT = 0, ENC = 1 }                                   # env.enc.mode, be32
+Priority     := { LOW = 0, NORMAL = 1, HIGH = 2 }                            # env.priority, be32; materialize -> NORMAL
+ReceiptType  := { CONSUMED = 0, BOUNCED = 1, UNDECRYPTABLE_UNRESOLVABLE = 2 } # receipt_v1, u8 (P1-2/§8.2)
+
+base32(b)    := Crockford base32, UPPERCASE, UNPADDED, big-endian, 5 bits per char, over the alphabet
+                0123456789ABCDEFGHJKMNPQRSTVWXYZ
+                # Stated literally on purpose. This is DIGITS-FIRST (0-9 then A-Z excluding I, L, O, U) and is
+                # NOT RFC 4648's alphabet, which is A-Z then 2-7: a different symbol set AND a different
+                # ordering. Deriving it as "RFC 4648 minus I/L/O/U" yields 28 symbols, not 32, and no digits.
+                # A reader who reconstructs the alphabet instead of reading it produces different characters
+                # for every key_id and msg_id -> every signature over those ascii() fields mismatches.
+                # Chosen because the output is LDH/ASCII-safe (uppercase alphanumeric, no '=' padding) so it
+                # passes ascii() unchanged and cannot collide with the addr() LDH rule, and because it is the
+                # alphabet msg_id's ULID already implies.
+*_key_id     := base32(sha256(pubkey))  # N = 52 chars = the FULL 256-bit digest, NEVER truncated (P0-B/FLAG-40).
+                # A shorter display form is display-only and MUST NOT change this on-wire, AD-signed value.
+                # NOT interchangeable with a raw public key: the §6.5 transcript consumes RAW 32-byte pubkeys
+                # and only its two trailing fields are these fingerprints. Vectors pin the swap as a failure.
+msg_id       := base32(48-bit big-endian unix-ms timestamp || 80 bits CSPRNG) # ULID, 26 chars, time-ordered.
+                # Monotonicity requirement is CLOCK-REGRESSION safety: if now <= last-minted ms, hold the
+                # high-water timestamp and increment the 80-bit random field (low-order, with carry) rather
+                # than minting a smaller/colliding id after an NTP step back.
+
 # --- Ingress validation (P2-K): reject, never normalize ---
 validate_ingress(env):
     assert LDH_ascii(env.from.name) and LDH_ascii(env.from.host)     # else -> error non_conforming_field
