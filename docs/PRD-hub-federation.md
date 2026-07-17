@@ -939,9 +939,16 @@ EncMode      := { PLAINTEXT = 0, ENC = 1 }                                   # e
 Priority     := { LOW = 0, NORMAL = 1, HIGH = 2 }                            # env.priority, be32; materialize -> NORMAL
 ReceiptType  := { CONSUMED = 0, BOUNCED = 1, UNDECRYPTABLE_UNRESOLVABLE = 2 } # receipt_v1, u8 (P1-2/§8.2)
 
-base32(b)    := Crockford base32 (RFC 4648 alphabet minus I, L, O, U), UPPERCASE, UNPADDED, big-endian,
-                5 bits per char. Chosen so the output is LDH/ASCII-safe (uppercase alphanumeric, no '='
-                padding) and therefore passes ascii() unchanged, and so it matches the ULID alphabet.
+base32(b)    := Crockford base32, UPPERCASE, UNPADDED, big-endian, 5 bits per char, over the alphabet
+                0123456789ABCDEFGHJKMNPQRSTVWXYZ
+                # Stated literally on purpose. This is DIGITS-FIRST (0-9 then A-Z excluding I, L, O, U) and is
+                # NOT RFC 4648's alphabet, which is A-Z then 2-7: a different symbol set AND a different
+                # ordering. Deriving it as "RFC 4648 minus I/L/O/U" yields 28 symbols, not 32, and no digits.
+                # A reader who reconstructs the alphabet instead of reading it produces different characters
+                # for every key_id and msg_id -> every signature over those ascii() fields mismatches.
+                # Chosen because the output is LDH/ASCII-safe (uppercase alphanumeric, no '=' padding) so it
+                # passes ascii() unchanged and cannot collide with the addr() LDH rule, and because it is the
+                # alphabet msg_id's ULID already implies.
 *_key_id     := base32(sha256(pubkey))  # N = 52 chars = the FULL 256-bit digest, NEVER truncated (P0-B/FLAG-40).
                 # A shorter display form is display-only and MUST NOT change this on-wire, AD-signed value.
                 # NOT interchangeable with a raw public key: the §6.5 transcript consumes RAW 32-byte pubkeys
