@@ -164,6 +164,23 @@ public class VectorTests
     }
 
     [Fact]
+    public void KeysFetch_pre_image_matches_the_committed_vector()
+    {
+        // Signed GET /keys request (brief PR1.4). A cross-implementation contract — another agent's fetch must
+        // reconstruct these exact bytes for the relay to authenticate it.
+        var actual = new JsonObject
+        {
+            ["_comment"] = "SignInputKeysFetch = DS_KEYS_FETCH || u8(1) || addr(requester) || addr(target) || "
+                         + "field(1,be64(requested_at)). Authenticates a key fetch to the fetcher's identity, "
+                         + "not the shared bearer token. DS_KEYS_FETCH routed to Harrell for App C.",
+            ["ds_keys_fetch"] = PreImage.DsKeysFetch,
+            ["sign_input_keys_fetch"] = Hex(PreImage.SignInputKeysFetch(
+                new Address("smiley", "acer-desktop"), new Address("wolf", "gateway"), 1752700000000)),
+        };
+        AssertMatchesVector("keys-fetch-preimage.json", actual);
+    }
+
+    [Fact]
     public void Receipt_pre_image_matches_the_committed_vector()
     {
         var actual = new JsonObject
