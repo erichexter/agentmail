@@ -13,7 +13,13 @@ sealed class AgentRecord
     public string Endpoint { get; set; } = "";
     public List<string> Aliases { get; set; } = new();  // alternate names that route to this agent
     public List<string> Endpoints { get; set; } = new(); // all reachable relay URLs (tailnet + LAN); sender tries each
-    public string Status { get; set; } = "online";   // online | offline (tombstone)
+    /// <summary>
+    /// online | offline (tombstone). SELF-ASSERTED AT REGISTER AND NEVER REFRESHED — it cannot go false on
+    /// its own, so it is NOT evidence of liveness and MUST NOT gate routing or capability decisions.
+    /// Use <see cref="DirectoryStore.IsStale"/> (last_seen freshness) for that. Only the record's OWNER may
+    /// set offline, and only explicitly (`register --offline`).
+    /// </summary>
+    public string Status { get; set; } = "online";
     public long Version { get; set; }                 // bumped on every change; LWW ordering key
     public string LastSeen { get; set; } = "";        // ISO-8601 UTC
     public List<string> Capabilities { get; set; } = new();
@@ -95,19 +101,67 @@ static class DirectoryStore
         if (File.Exists(p)) File.Delete(p);
     }
 
-    /// <summary>Delete records whose last_seen is older than <paramref name="cutoffUtc"/>. Returns count pruned.</summary>
-    public static int Prune(DateTime cutoffUtc)
+    // --- Freshness (#8) ---------------------------------------------------------------------------
+    //
+    // Staleness is COMPUTED AT READ TIME and never stored or gossiped. That is deliberate: a stored
+    // "offline" is an assertion, and only the record's owner is entitled to make it. If a non-owner could
+    // write staleness into the record and gossip it, one node that merely hadn't heard from a peer in a day
+    // would tombstone that peer fleet-wide — strictly worse than the bug this replaces.
+
+    /// <summary>How long since last_seen before a record stops being trusted for routing. Never deletes anything.</summary>
+    public static TimeSpan StaleAfter { get; } =
+        TimeSpan.FromHours(int.TryParse(Environment.GetEnvironmentVariable("AGENTMAIL_STALE_HOURS"), out int h) && h > 0 ? h : 24);
+
+    /// <summary>True if this record is for an agent hosted by THIS relay.</summary>
+    public static bool IsLocal(AgentRecord r) => string.Equals(r.Host, Paths.Host, StringComparison.OrdinalIgnoreCase);
+
+    public static bool TryParseLastSeen(AgentRecord r, out DateTime utc) =>
+        DateTime.TryParse(r.LastSeen, null,
+            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out utc);
+
+    /// <summary>
+    /// True if the record is too old to be trusted for a routing or capability decision.
+    ///
+    /// A LOCALLY-HOSTED record is NEVER stale, whatever its last_seen says. A relay always knows which agents
+    /// it hosts; `Resolve(name, Paths.Host)` failing for a local agent is incoherent by construction, and is
+    /// exactly what took wolf@windev2407eval offline on 2026-07-17 — his own relay 404'd him at 24.2h.
+    ///
+    /// Freshness — not <see cref="AgentRecord.Status"/> — is the signal. Status is self-asserted at register
+    /// and never refreshed, so it cannot go false; four agents were reporting "online" while unroutable.
+    /// </summary>
+    public static bool IsStale(AgentRecord r, DateTime? nowUtc = null)
+    {
+        if (IsLocal(r)) return false;
+        if (!TryParseLastSeen(r, out var seen)) return true;   // unparseable ⇒ untrustworthy, but still not deleted
+        return (nowUtc ?? DateTime.UtcNow) - seen > StaleAfter;
+    }
+
+    /// <summary>True if this record may be used for a routing/capability decision: present, fresh, not tombstoned.</summary>
+    public static bool IsRoutable(AgentRecord r, DateTime? nowUtc = null) =>
+        !IsStale(r, nowUtc) && !string.Equals(r.Status, "offline", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Explicit, operator-invoked reaping. NOT automatic and NOT on any timer — the relay's 60s prune loop
+    /// that used to call this is gone (#8).
+    ///
+    /// Automatic deletion is what produced the flap: prune removed the file, a peer gossiped the record back
+    /// (Merge sees current==null ⇒ IsNewer ⇒ Save), prune removed it again — so delivery to a live agent
+    /// alternated 202/404 on a ~60s cycle with neither end told. Deletion also destroys the LWW high-water:
+    /// register computes Version = (existing?.Version ?? 0) + 1, so a re-register into a deleted slot restarts
+    /// at v1 and LOSES to any peer still holding v3, silently undoing the recovery.
+    ///
+    /// Never deletes a locally-hosted record. To retire an agent, its OWNER tombstones it explicitly with
+    /// `register --offline`, which bumps Version so the tombstone wins LWW and propagates instead of being
+    /// resurrected.
+    /// </summary>
+    public static int PruneExplicit(DateTime cutoffUtc)
     {
         int n = 0;
         foreach (var r in All())
         {
-            if (DateTime.TryParse(r.LastSeen, null,
-                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
-                    out var t) && t < cutoffUtc)
-            {
-                Delete(r.Agent, r.Host);
-                n++;
-            }
+            if (IsLocal(r)) continue;                                  // a relay never forgets its own agents
+            if (TryParseLastSeen(r, out var t) && t < cutoffUtc) { Delete(r.Agent, r.Host); n++; }
         }
         return n;
     }
