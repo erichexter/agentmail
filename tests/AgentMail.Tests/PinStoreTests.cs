@@ -61,7 +61,7 @@ public class PinStoreTests
             KeyEpoch = 99,
             RecordEpoch = 9999,                    // and a sky-high epoch to try to win monotonicity
         };
-        forged.AgentSig = attackerKey.Sign(PreImage.DsAgentCert, PreImage.SignInputAgentCertLite(forged));
+        forged.AgentSig = attackerKey.Sign(PreImage.DsAgentCertLite, PreImage.SignInputAgentCertLite(forged));
 
         Assert.True(forged.VerifySelfSignature());               // it IS a valid self-signature...
         Assert.Equal(PinResult.RejectedKeyMismatch, store.Offer(forged));   // ...and it is STILL rejected

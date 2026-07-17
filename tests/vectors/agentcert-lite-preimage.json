@@ -1,5 +1,8 @@
 {
-  "_comment": "PR1 TOFU record (brief PR1.3). sign_input_agentcert reduced to identity-only: DS_AGENTCERT || u8(1) || addr || field(1,ident_pub) || field(1,be32(key_epoch)) || field(1,be64(record_epoch)). not_after/issuer_id OMITTED (PR3). Flagged to Wolf.",
-  "ds_agent_cert": "agentmail/v1/agent-cert",
-  "sign_input_agentcert_lite": "01000000176167656e746d61696c2f76312f6167656e742d63657274010100000004776f6c66010000000767617465776179000100000020c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf01000000040000000301000000080000000000000007"
+  "_comment": "PR1 self-signed TOFU pin (brief PR1.3). A DIFFERENT object from the CA-issued AgentCert (Wolf\u0027s ruling 2026-07-17), NOT a reduced form: it has its own DS tag and omits the CA-issuance fields (not_after, issuer_id) because a self-signed pin has no CA. DS_AGENTCERT_LITE tag-namespace addition routed to Harrell for App C.",
+  "ds_agent_cert_lite": "agentmail/v1/agent-cert-lite",
+  "ds_agent_cert_full_ca": "agentmail/v1/agent-cert",
+  "accept_sign_input_agentcert_lite": "010000001c6167656e746d61696c2f76312f6167656e742d636572742d6c697465010100000004776f6c66010000000767617465776179000100000020c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf01000000040000000301000000080000000000000007",
+  "reject_full_ca_agentcert_same_identity": "01000000176167656e746d61696c2f76312f6167656e742d63657274010100000004776f6c66010000000767617465776179000100000020c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf0100000004000000030100000008000001b8dac5b4000100000008000000000000000701000000086865782d726f6f74",
+  "reject_why": "the CA AgentCert over the same addr/ident_pub/key_epoch/record_epoch \u2014 different DS tag AND different field set, so a non-matching pre-image. A lite pin MUST NOT verify as an AgentCert and vice versa; that boundary is what PR3 dual-trust relies on."
 }

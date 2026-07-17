@@ -54,12 +54,12 @@ sealed class AgentCertLite
             KeyEpoch = id.KeyEpoch,
             RecordEpoch = recordEpoch,
         };
-        c.AgentSig = id.Sign(PreImage.DsAgentCert, PreImage.SignInputAgentCertLite(c));
+        c.AgentSig = id.Sign(PreImage.DsAgentCertLite, PreImage.SignInputAgentCertLite(c));
         return c;
     }
 
     /// <summary>True iff the agent signature verifies against the record's OWN ident_pub. That is all TOFU can
     /// check — the record vouches for itself; the pin is what makes it trustworthy across sightings.</summary>
     public bool VerifySelfSignature() =>
-        Identity.VerifyDetached(PreImage.DsAgentCert, PreImage.SignInputAgentCertLite(this), AgentSig, IdentPub);
+        Identity.VerifyDetached(PreImage.DsAgentCertLite, PreImage.SignInputAgentCertLite(this), AgentSig, IdentPub);
 }

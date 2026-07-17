@@ -39,7 +39,16 @@ static class PreImage
     public const string DsAuthPrefix  = "agentmail/v1/preimage";
     public const string DsAeadPrefix  = "agentmail/v1/aead-ad";
     public const string DsKeys        = "agentmail/v1/keys";
+    /// <summary>The CA-issued AgentCert (App C, signed by the intermediate). Reserved for PR3 — do NOT use it for the self-signed pin.</summary>
     public const string DsAgentCert   = "agentmail/v1/agent-cert";
+    /// <summary>
+    /// The PR1 self-signed TOFU pin — a DIFFERENT object from the CA-issued AgentCert, not a reduced form of it.
+    /// Domain-separated on Wolf's ruling (2026-07-17): sharing DS_AGENTCERT with a CA-signed cert would blur the
+    /// object boundary PR3's dual-trust depends on (pin-check vs chain-to-root). App C tag-namespace addition is
+    /// being routed to Harrell as a proposed diff; if he picks a different spelling, this one constant + its
+    /// vector rename.
+    /// </summary>
+    public const string DsAgentCertLite = "agentmail/v1/agent-cert-lite";
     /// <summary>Receipts are signed envelopes, not bare status (FLAG-28). Not in App C's tag list — added by the brief §3.</summary>
     public const string DsReceipt     = "agentmail/v1/receipt";
 
@@ -246,24 +255,46 @@ static class PreImage
     }
 
     /// <summary>
-    /// sign_input_agentcert reduced to the PR1 identity-only fields (brief PR1.3):
-    ///     DS_AGENTCERT ‖ u8(1) ‖ addr(addr) ‖ field(1, ident_pub) ‖ field(1, be32(key_epoch)) ‖ field(1, be64(record_epoch))
+    /// Pre-image for the PR1 self-signed TOFU pin (brief PR1.3):
+    ///     DS_AGENTCERT_LITE ‖ u8(1) ‖ addr(addr) ‖ field(1, ident_pub) ‖ field(1, be32(key_epoch)) ‖ field(1, be64(record_epoch))
     ///
-    /// App C's full sign_input_agentcert also carries not_after and issuer_id, which are PR3/PKI concepts with
-    /// no value in PR1 (no CA exists). They are OMITTED here, not zero-filled — a PR3 verifier must know a PR1
-    /// record is the short form. That reduction is a wire choice; it is isolated in this one method and pinned
-    /// in vectors, and flagged to Wolf for a ruling exactly like the content_hash encoding was. If he rules the
-    /// PR3 fields should be present-but-empty, only this method changes.
+    /// This is NOT a reduced App C AgentCert (Wolf's ruling, 2026-07-17). App C's AgentCert is signed by the
+    /// intermediate CA and carries not_after + issuer_id — CA-issuance fields. A self-signed pin has no CA, no
+    /// issuer, and no CA-set expiry, so those fields are ABSENT because they belong to a different object, not
+    /// omitted-as-empty-values. That is why it gets its own DS tag rather than sharing DS_AGENTCERT: PR3's
+    /// dual-trust verifies a pin (pin-check) and a cert (chain-to-root) by different paths, and the tag is what
+    /// keeps them from being confused. Vectors pin one ACCEPT and one REJECT proving this pre-image does not
+    /// equal a full AgentCert over the same identity fields.
     /// </summary>
     public static byte[] SignInputAgentCertLite(AgentCertLite c)
     {
         using var p = new MemoryStream();
-        Field(p, true, DsAgentCert);
+        Field(p, true, DsAgentCertLite);
         U8(p, VersionByte);
         Addr(p, c.Addr);
         Field(p, true, c.IdentPub);
         FieldBe32(p, c.KeyEpoch);
         FieldBe64(p, c.RecordEpoch);
+        return p.ToArray();
+    }
+
+    /// <summary>
+    /// The full App C AgentCert pre-image (line 332), signed by the intermediate CA. Built HERE only so a vector
+    /// can prove the self-signed lite pin's pre-image differs from it — the real signing lands in PR3. If this
+    /// ever grows a caller before PR3, that is a bug: nothing pre-PR3 has a CA to sign it.
+    /// </summary>
+    internal static byte[] SignInputAgentCertFull(Address addr, ReadOnlySpan<byte> identPub, uint keyEpoch,
+                                                  ulong notAfter, ulong recordEpoch, string issuerId)
+    {
+        using var p = new MemoryStream();
+        Field(p, true, DsAgentCert);
+        U8(p, VersionByte);
+        Addr(p, addr);
+        Field(p, true, identPub);
+        FieldBe32(p, keyEpoch);
+        FieldBe64(p, notAfter);
+        FieldBe64(p, recordEpoch);
+        Field(p, true, AssertAscii(issuerId, "issuer_id"));
         return p.ToArray();
     }
 

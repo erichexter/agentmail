@@ -135,14 +135,30 @@ public class VectorTests
             RecordEpoch = 7,
         };
 
+        // The full CA-issued AgentCert over the SAME identity fields — built only to prove the lite pin differs
+        // from it. A PR3 verifier chains this to a root; a PR1 verifier pin-checks the lite record. Same identity,
+        // two objects, two pre-images.
+        byte[] full = PreImage.SignInputAgentCertFull(
+            record.Addr, record.IdentPub, record.KeyEpoch, notAfter: 1893456000000, record.RecordEpoch, issuerId: "hex-root");
+        byte[] lite = PreImage.SignInputAgentCertLite(record);
+
         var actual = new JsonObject
         {
-            ["_comment"] = "PR1 TOFU record (brief PR1.3). sign_input_agentcert reduced to identity-only: "
-                         + "DS_AGENTCERT || u8(1) || addr || field(1,ident_pub) || field(1,be32(key_epoch)) || "
-                         + "field(1,be64(record_epoch)). not_after/issuer_id OMITTED (PR3). Flagged to Wolf.",
-            ["ds_agent_cert"] = PreImage.DsAgentCert,
-            ["sign_input_agentcert_lite"] = Hex(PreImage.SignInputAgentCertLite(record)),
+            ["_comment"] = "PR1 self-signed TOFU pin (brief PR1.3). A DIFFERENT object from the CA-issued "
+                         + "AgentCert (Wolf's ruling 2026-07-17), NOT a reduced form: it has its own DS tag and "
+                         + "omits the CA-issuance fields (not_after, issuer_id) because a self-signed pin has no "
+                         + "CA. DS_AGENTCERT_LITE tag-namespace addition routed to Harrell for App C.",
+            ["ds_agent_cert_lite"] = PreImage.DsAgentCertLite,
+            ["ds_agent_cert_full_ca"] = PreImage.DsAgentCert,
+            ["accept_sign_input_agentcert_lite"] = Hex(lite),
+            ["reject_full_ca_agentcert_same_identity"] = Hex(full),
+            ["reject_why"] = "the CA AgentCert over the same addr/ident_pub/key_epoch/record_epoch — different "
+                           + "DS tag AND different field set, so a non-matching pre-image. A lite pin MUST NOT "
+                           + "verify as an AgentCert and vice versa; that boundary is what PR3 dual-trust relies on.",
         };
+
+        // The object boundary, asserted: same identity, provably distinct signed bytes.
+        Assert.NotEqual(Convert.ToHexString(lite), Convert.ToHexString(full));
 
         AssertMatchesVector("agentcert-lite-preimage.json", actual);
     }
