@@ -42,3 +42,16 @@ last PR1 slice.)
 2. The watcher log line says it is watching `*.msg.md and *.msg.json` (not "legacy").
 3. Unknown-field tolerance holds — a record/envelope with newer fields still parses (FLAG-42), so a
    mixed-version fleet does not split its gossip directory.
+
+## Where state lives (for verification / debugging)
+
+Not obvious from a casual `ls` of the agent dir — the operational state is under `~/.claude/agentmail/`:
+
+- **Dedup / replay ledger:** `state/done/<sha>.done.json`, keyed `(from, msg_id)`. Written **only** after a
+  fully-verified consume (FLAG-30). A `find -name "*.done"` misses it — the extension is `.done.json`.
+  Confirm a sealed message was consumed: `ls ~/.claude/agentmail/state/done/`.
+- **Pinned sender keys (TOFU):** `pki/pinned/<name>@<host>.json`.
+- **Published Keys bundle (served by GET /keys):** `pki/published/<name>@<host>.json`.
+- **Quarantined (failed-verify) messages:** `agents/<agent>/quarantine/`.
+- **Decrypted sealed messages** land in `agents/<agent>/inbox/<ULID>.msg.md` (ULID name = came in sealed;
+  a legacy plaintext message has a shorter Guid name).
