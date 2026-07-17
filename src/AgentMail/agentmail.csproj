@@ -13,7 +13,10 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>agentmail</ToolCommandName>
     <PackageId>AgentMail</PackageId>
-    <Version>0.4.1</Version>
+    <Version>0.4.2</Version>
+    <!-- Embed the git sha in InformationalVersion so builds are DISTINGUISHABLE (Finding 1): 0.4.1 spanned
+         many merges, so same-version different-code builds could not be told apart and tool update no-op'd. -->
+    <IncludeSourceRevisionInInformationalVersion>true</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <!-- Crypto (E2E). Version PINNED: the FLAG-8 spike validated exactly these against RFC 7748 §6.1

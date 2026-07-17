@@ -33,6 +33,10 @@ static class Program_
 
     static string NowUtc() => DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
+    // ULID for sealed msg_id — clock-regression-safe, persisted high-water under state/ulid.
+    static readonly Ulid MsgIdMinter = new(System.IO.Path.Combine(Paths.Root, "state", "ulid"));
+    static string NewMsgId() => MsgIdMinter.Next();
+
     // register --name X [--user U] [--port P] [--offline] [--push]
     static async Task<int> Register(Cli cli)
     {
@@ -140,13 +144,64 @@ static class Program_
                 if (await Transport.Probe(ep)) { endpoint = ep; break; }
             if (endpoint is null)
                 return Fail($"remote delivery to {to}: no reachable endpoint (tried {string.Join(", ", candidates)})");
-            var (ok, detail) = await Transport.SendInbox(endpoint, config.EffectiveToken, env);
+
+            // Capability negotiation on send (FLAG-32 / activation). Decide seal vs plaintext vs hold from the
+            // recipient's advertised capabilities + whether its Keys are fetchable. An e2e peer is never
+            // downgraded to plaintext: no keys -> hold+alert (or refuse under --require-e2e).
+            var peer = new Negotiation.PeerView(
+                AdvertisesE2e: rec is not null && rec.Capabilities.Any(c => string.Equals(c, Capabilities.E2e, StringComparison.OrdinalIgnoreCase)),
+                LastSeenMs: 0);
+            bool requireE2e = cli.Has("require-e2e");
+            bool sealedSend = false;
+
+            (bool ok, string detail) result;
+            if (peer.AdvertisesE2e || requireE2e)
+            {
+                var (fromNm, fromHst) = AgentRef.Split(from);
+                if (fromHst is not null && fromHst != Paths.Host)
+                    return Fail($"to seal, the sender must be local (need {fromNm}'s identity key to sign); '{from}' is remote");
+                var senderId = Identity.LoadOrCreate(new Address(fromNm, Paths.Host));
+                var recipientAddr = new Address(toName, toHost!);
+
+                var bundle = await Transport.GetKeys(endpoint, senderId, recipientAddr);
+                var decision = Negotiation.Outbound(peer, haveKeys: bundle is not null, requireE2e);
+                switch (decision)
+                {
+                    case OutboundDecision.Seal:
+                        // Sender-side TOFU: pin the key we just fetched via signed GET /keys. This is
+                        // first-contact sender trust (disclosed FLAG-11) and is DISTINCT from the receive-side
+                        // inbox-pin forbidden in #20 — that one lets any inbound sender establish a pin; this
+                        // one pins a key WE chose to fetch for a peer WE chose to seal to.
+                        var pinResult = new PinStore().Offer(bundle!);
+                        if (pinResult == PinResult.RejectedKeyMismatch)
+                            return Fail($"refusing to seal to {to}: fetched key MISMATCHES the pinned key for this peer (possible substitution). Re-pin out of band.");
+                        var sealed_ = Seal.Create(senderId, recipientAddr, bundle!.IdentPub, bundle.KeyEpoch,
+                            NewMsgId(), System.Text.Encoding.UTF8.GetBytes(body), contentType: "text/markdown");
+                        result = await Transport.SendSealed(endpoint, config.EffectiveToken, sealed_);
+                        sealedSend = result.ok;
+                        if (result.ok) Console.WriteLine($"sealed {sealed_.MsgId} -> {to} via {endpoint}  ({result.detail})");
+                        break;
+                    case OutboundDecision.HoldNoKeys:
+                        return Fail($"HOLD: {to} advertises e2e but its keys are unavailable (GET /keys returned none). NOT downgrading to plaintext. Retry when keys are reachable.");
+                    case OutboundDecision.RefuseRequireE2e:
+                        return Fail($"REFUSE: --require-e2e set for {to} but no keys available. Not sending plaintext.");
+                    default:
+                        result = await Transport.SendInbox(endpoint, config.EffectiveToken, env);
+                        break;
+                }
+            }
+            else
+            {
+                result = await Transport.SendInbox(endpoint, config.EffectiveToken, env);
+            }
+            var (ok, detail) = result;
             if (!ok) return Fail($"remote delivery to {to} via {endpoint} failed: {detail}");
 
-            // keep a local outbox copy when the sender is on this host
+            // keep a local outbox copy when the sender is on this host (the plaintext form; the sealed body is
+            // ephemeral by design). The "sealed <msg_id>" line already printed for the sealed path.
             var (fn, fh) = AgentRef.Split(from);
             if (fh is null || fh == Paths.Host) { Paths.EnsureAgent(fn); Io.WriteAtomic(Path.Combine(Paths.Outbox(fn), env.FileName), env.Serialize()); }
-            Console.WriteLine($"delivered {env.Id} -> {to} via {endpoint}  ({detail})");
+            if (!sealedSend) Console.WriteLine($"delivered {env.Id} -> {to} via {endpoint}  ({detail})");
             return 0;
         }
 
@@ -189,11 +244,15 @@ static class Program_
     /// update take" must be checkable.</summary>
     static int Version()
     {
-        var v = System.Reflection.Assembly.GetExecutingAssembly()
+        var info = System.Reflection.Assembly.GetExecutingAssembly()
             .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion
             ?? typeof(Program_).Assembly.GetName().Version?.ToString() ?? "unknown";
-        // Strip the +<git-sha> build-metadata suffix if present, leaving the clean semver.
-        Console.WriteLine(v.Split('+')[0]);
+        // InformationalVersion is "0.4.2+<full-sha>". Print "0.4.2 (<short-sha>)" so a deploy can tell two
+        // same-version builds apart (Finding 1) — 0.4.1 spanned #14..#23 and tool-update no-op'd between them.
+        var parts = info.Split('+');
+        string semver = parts[0];
+        string sha = parts.Length > 1 ? parts[1][..Math.Min(12, parts[1].Length)] : "no-sha";
+        Console.WriteLine($"{semver} ({sha})");
         return 0;
     }
 

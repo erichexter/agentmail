@@ -47,9 +47,11 @@ static class Paths
 
     /// <summary>
     /// Routing name: the Tailscale MagicDNS short name when available, else the machine name.
-    /// Stable per device across tailnets.
+    /// Stable per device across tailnets. AGENTMAIL_HOST overrides it — needed to run more than one relay
+    /// identity on a single box (multi-host tests, containers), where the machine name would otherwise collide.
     /// </summary>
-    public static string Host => Tailscale.Host;
+    public static string Host =>
+        Environment.GetEnvironmentVariable("AGENTMAIL_HOST") is { Length: > 0 } h ? h.ToLowerInvariant() : Tailscale.Host;
 
     public static readonly JsonSerializerOptions Json = new()
     {

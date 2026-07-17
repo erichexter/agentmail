@@ -69,8 +69,17 @@ static class Relay
         app.MapPost("/inbox", async (HttpRequest req) =>
         {
             if (!Authorized(req)) return Results.Unauthorized();
+
+            // Read the body once so we can tell a SEALED envelope (*.msg.json, has "enc"+"msg_id") from a legacy
+            // plaintext Envelope, and route accordingly. A sealed envelope goes through verify-before-act
+            // (Consume.Process); a legacy one keeps the plaintext file-drop + FLAG-32 gate below.
+            string raw;
+            using (var reader = new StreamReader(req.Body)) raw = await reader.ReadToEndAsync();
+            if (LooksSealed(raw))
+                return await ReceiveSealed(raw);
+
             Envelope? env;
-            try { env = await System.Text.Json.JsonSerializer.DeserializeAsync<Envelope>(req.Body, Paths.Json); }
+            try { env = System.Text.Json.JsonSerializer.Deserialize<Envelope>(raw, Paths.Json); }
             catch { return Results.BadRequest("invalid envelope"); }
             if (env is null || string.IsNullOrWhiteSpace(env.To)) return Results.BadRequest("missing 'to'");
 
@@ -184,6 +193,67 @@ static class Relay
     // any peer holding the record replays it straight back.
 
     static ulong ulongNow() => (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+    /// <summary>A sealed envelope carries "enc" + "msg_id"; a legacy plaintext Envelope does not.</summary>
+    static bool LooksSealed(string json) =>
+        json.Contains("\"enc\"", StringComparison.Ordinal) && json.Contains("\"msg_id\"", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Receive-side verify-before-act for a sealed envelope (activation slice / brief PR1.6). The relay runs on
+    /// the recipient's box, so it loads the recipient's identity and decrypts on their behalf; the agent then
+    /// reads plaintext as it always has. FLAG-30: .done is written ONLY on a fully-verified consume; every
+    /// failure quarantines and leaves .done untouched.
+    /// </summary>
+    static Task<IResult> ReceiveSealed(string raw)
+    {
+        Crypto.SealedEnvelope? env;
+        try { env = System.Text.Json.JsonSerializer.Deserialize<Crypto.SealedEnvelope>(raw, Paths.Json); }
+        catch { return Task.FromResult(Results.BadRequest("invalid sealed envelope")); }
+        if (env is null) return Task.FromResult(Results.BadRequest("invalid sealed envelope"));
+
+        var target = DirectoryStore.Resolve(env.To.Name, Paths.Host);
+        if (target is null)
+            return Task.FromResult(Results.NotFound($"no agent '{env.To.Name}' on host '{Paths.Host}'"));
+
+        var recipientId = Crypto.Identity.LoadOrCreate(new Crypto.Address(target.Agent, Paths.Host));
+        var consumer = new Crypto.Consume(recipientId);
+
+        // Resolve the sender's pinned key. Verify-before-act refuses an UNPINNED sender (never inbox-pins — #20).
+        byte[]? ResolvePin(Crypto.Address from)
+        {
+            var pin = new Crypto.PinStore().Get(from);
+            if (pin is not null) return pin.IdentPub;
+            // First contact from a sealed sender: fetch+pin its published bundle if reachable, then use it. This
+            // is the same signed-GET/keys TOFU the SENDER does — a deliberate, disclosed first-contact trust
+            // (FLAG-11), NOT accepting whatever key rode in on the message.
+            var senderRec = DirectoryStore.Get(from.Name, from.Host);
+            var ep = senderRec?.Endpoints.FirstOrDefault();
+            if (ep is null) return null;
+            var fetched = Transport.GetKeys(ep, recipientId, from).GetAwaiter().GetResult();
+            if (fetched is null) return null;
+            return new Crypto.PinStore().Offer(fetched) is Crypto.PinResult.RejectedKeyMismatch ? null : fetched.IdentPub;
+        }
+
+        var result = consumer.Process(env, ResolvePin, ulongNow());
+        switch (result.Outcome)
+        {
+            case Crypto.ConsumeOutcome.Delivered:
+                Paths.EnsureAgent(target.Agent);
+                // The agent reads plaintext, as always — E2E is transparent to it. At-rest encryption is PR2.
+                Io.WriteAtomic(Path.Combine(Paths.Inbox(target.Agent), $"{env.MsgId}.msg.md"),
+                    System.Text.Encoding.UTF8.GetString(result.Plaintext!));
+                return Task.FromResult(Results.Accepted($"/inbox/{env.MsgId}",
+                    new { delivered = env.MsgId, to = $"{target.Agent}@{Paths.Host}", sealed_verified = true }));
+            case Crypto.ConsumeOutcome.DuplicateShortCircuited:
+                return Task.FromResult(Results.Accepted($"/inbox/{env.MsgId}", new { duplicate = env.MsgId }));
+            case Crypto.ConsumeOutcome.ExpiredDropped:
+                return Task.FromResult(Results.Accepted($"/dropped/{env.MsgId}", new { dropped = env.MsgId, reason = "expired" }));
+            default: // Quarantined
+                Console.Error.WriteLine($"alert: quarantined sealed {env.MsgId} for {target.Agent} from {env.From.Key}: {result.Reason}");
+                return Task.FromResult(Results.Accepted($"/quarantine/{env.MsgId}",
+                    new { quarantined = env.MsgId, reason = result.Reason }));
+        }
+    }
 
     // Constant-time compare so token check doesn't leak length/prefix via timing.
     private static bool CryptoEquals(string a, string b)
