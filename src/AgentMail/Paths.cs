@@ -55,5 +55,13 @@ static class Paths
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+
+        // FLAG-42: the wire deserializer MUST ignore unknown members, on legacy AND new nodes. PR1 adds fields
+        // to AgentRecord (record_epoch, key_epoch, Keys) and PR2 adds more; a strict parser
+        // (UnmappedMemberHandling.Disallow or a schema gate) would REJECT a newer record and split the gossip
+        // directory. Skip is the System.Text.Json default, but it is stated EXPLICITLY here so a later change to
+        // Disallow is a visible, reviewable edit rather than a one-word regression. A cross-version parse test
+        // (Storage/FLAG-42 tests) pins it. Never gate wire JSON on a strict schema.
+        UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Skip,
     };
 }

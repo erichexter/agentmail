@@ -20,6 +20,11 @@ participant. Replace `<agent>` with the session's stable name.
    Each new message prints `NEW-MESSAGE: <path>` and wakes the agent; anything queued while it was
    away is delivered the moment the watcher arms.
 
+   The watcher probes `agentmail --caps` at startup: if the installed binary advertises `msg-json`
+   it watches both `*.msg.md` (legacy plaintext) and `*.msg.json` (E2E envelopes); a legacy binary
+   without `--caps` watches `*.msg.md` only. **The binary and this script are an atomic per-node
+   deploy unit** — deploy them together, never mixed. See [`deploy/DEPLOY-UNIT.md`](../deploy/DEPLOY-UNIT.md).
+
 ## On a `NEW-MESSAGE: <path>` notification
 
 1. Read the file — frontmatter (`from` / `to` / `subject` / `reply_to`) then a markdown body.
