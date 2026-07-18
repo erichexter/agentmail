@@ -1,0 +1,21 @@
+# .NET build output
+bin/
+obj/
+nupkg/
+*.user
+*.suo
+.vs/
+
+# Local tool restore
+.config/dotnet-tools.json.bak
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# AgentMail runtime data must never be committed (inboxes, tokens, registry)
+config.json
+agentmail-data/
+
+bin/
+obj/

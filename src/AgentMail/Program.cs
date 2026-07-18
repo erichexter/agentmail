@@ -1,0 +1,383 @@
+using AgentMail;
+using AgentMail.Crypto;
+using System.Reflection;
+
+return await Program_.Run(args);
+
+static class Program_
+{
+    public static async Task<int> Run(string[] args)
+    {
+        var cli = Cli.Parse(args);
+        try
+        {
+            return cli.Verb switch
+            {
+                "register" => await Register(cli),
+                "send" => await Send(cli),
+                "resolve" => Resolve(cli),
+                "agents" => await Agents(cli),
+                "fetch-keys" => await FetchKeys(cli),
+                "--caps" or "caps" => Caps(),
+                "--version" or "version" => Version(),
+                "serve" => await Relay.Run(cli),
+                "" or "help" or "--help" => Help(),
+                _ => Fail($"unknown verb '{cli.Verb}'. Try `agentmail help`."),
+            };
+        }
+        catch (CliError e)
+        {
+            return Fail(e.Message);
+        }
+    }
+
+    static string NowUtc() => DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+    // ULID for sealed msg_id — clock-regression-safe, persisted high-water under state/ulid.
+    static readonly Ulid MsgIdMinter = new(System.IO.Path.Combine(Paths.Root, "state", "ulid"));
+    static string NewMsgId() => MsgIdMinter.Next();
+
+    // register --name X [--user U] [--port P] [--offline] [--push]
+    static async Task<int> Register(Cli cli)
+    {
+        string name = cli.Require("name");
+        var config = Config.Load();
+        if (cli.Get("user") is { } u) config.User = u;
+        if (cli.Get("port") is { } p && int.TryParse(p, out int port)) config.Port = port;
+        config.Save();
+
+        Paths.EnsureRoot();
+        Paths.EnsureAgent(name);
+        var ts = Paths.Tailscale;
+
+        var existing = DirectoryStore.Get(name, Paths.Host);
+        var rec = existing ?? new AgentRecord { Agent = name, Host = Paths.Host };
+        rec.User = config.User;
+        rec.Tailnet = ts.Tailnet;
+        rec.Endpoints = config.EndpointsFor(ts);
+        rec.Endpoint = rec.Endpoints.FirstOrDefault() ?? config.EndpointFor(ts);
+        if (cli.Get("alias") is { } aliasCsv)
+            rec.Aliases = aliasCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(s => s.ToLowerInvariant()).Distinct().ToList();
+        rec.Status = cli.Has("offline") ? "offline" : "online";
+        // Advertise the network-facing capabilities so peers can negotiate (FLAG-9.2/FLAG-32). Publishing `e2e`
+        // means "this node reads *.msg.json AND will treat inbound plaintext from other e2e peers under the
+        // FLAG-32 rules". An operator can suppress it with --no-e2e to stay a legacy plaintext node.
+        rec.Capabilities = cli.Has("no-e2e") ? new List<string>() : new List<string>(Capabilities.All);
+        rec.LastSeen = NowUtc();
+        rec.Version = (existing?.Version ?? 0) + 1;   // every change advances the LWW clock
+        DirectoryStore.Save(rec);
+
+        // Publish this agent's identity-only Keys bundle (brief PR1.4) so its home relay can serve GET /keys.
+        // The bundle is the self-signed AgentCertLite; record_epoch tracks the LWW Version so a re-register
+        // advances the published bundle's epoch monotonically, matching the pin store's reject-lower rule.
+        if (!cli.Has("offline"))
+        {
+            var identity = Identity.LoadOrCreate(new Address(name, Paths.Host));
+            KeysBundle.Publish(AgentCertLite.Create(identity, recordEpoch: (ulong)rec.Version));
+        }
+
+        string aliasNote = rec.Aliases.Count > 0 ? $", aliases=[{string.Join(",", rec.Aliases)}]" : "";
+        Console.WriteLine($"{(cli.Has("offline") ? "offline" : "registered")}: {rec.Key}  (user={rec.User}{aliasNote}, v{rec.Version})");
+        Console.WriteLine($"  endpoints: {string.Join(", ", rec.Endpoints)}");
+
+        // Optionally announce this record to seed hosts (Phase 2 precursor to full gossip).
+        if (cli.Has("push") && config.Seeds.Count > 0)
+        {
+            string token = config.EnsureToken();
+            foreach (var seed in config.Seeds)
+            {
+                var (ok, detail) = await Transport.Register(seed, token, rec);
+                Console.WriteLine($"  push -> {seed}: {(ok ? "ok" : "FAILED " + detail)}");
+            }
+        }
+        return 0;
+    }
+
+    // send --to Y --from X --subject S [--body text|-] [--reply-to R]
+    static async Task<int> Send(Cli cli)
+    {
+        string to = cli.Require("to");
+        string from = cli.Require("from");
+        string subject = cli.Get("subject") ?? "(no subject)";
+        string? replyTo = cli.Get("reply-to");
+
+        string body = cli.Get("body") switch
+        {
+            "-" => await Console.In.ReadToEndAsync(),
+            { } text => text,
+            null => "",
+        };
+
+        var (toName, toHost) = AgentRef.Split(to);
+        var env = new Envelope
+        {
+            Id = Guid.NewGuid().ToString("N")[..12],
+            From = from,
+            To = to,
+            Subject = subject,
+            ReplyTo = replyTo,
+            Sent = NowUtc(),
+            Body = body,
+        };
+
+        bool local = toHost is null || toHost == Paths.Host;
+        if (!local)
+        {
+            var config = Config.Load();
+            var rec = DirectoryStore.Get(toName, toHost!);
+            // Try every advertised endpoint (tailnet + LAN); use the first that answers a health probe.
+            var candidates = new List<string>();
+            if (rec is not null)
+            {
+                candidates.AddRange(rec.Endpoints);
+                if (candidates.Count == 0 && !string.IsNullOrWhiteSpace(rec.Endpoint)) candidates.Add(rec.Endpoint);
+            }
+            if (candidates.Count == 0)
+            {
+                var ts = Paths.Tailscale;
+                string authority = ts.Tailnet is { } suffix ? $"{toHost}.{suffix}" : toHost!;
+                candidates.Add($"http://{authority}:{config.Port}");
+            }
+            string? endpoint = null;
+            foreach (var ep in candidates)
+                if (await Transport.Probe(ep)) { endpoint = ep; break; }
+            if (endpoint is null)
+                return Fail($"remote delivery to {to}: no reachable endpoint (tried {string.Join(", ", candidates)})");
+
+            // Capability negotiation on send (FLAG-32 / activation). Decide seal vs plaintext vs hold from the
+            // recipient's advertised capabilities + whether its Keys are fetchable. An e2e peer is never
+            // downgraded to plaintext: no keys -> hold+alert (or refuse under --require-e2e).
+            var peer = new Negotiation.PeerView(
+                AdvertisesE2e: rec is not null && rec.Capabilities.Any(c => string.Equals(c, Capabilities.E2e, StringComparison.OrdinalIgnoreCase)),
+                LastSeenMs: 0);
+            bool requireE2e = cli.Has("require-e2e");
+            bool sealedSend = false;
+
+            (bool ok, string detail) result;
+            if (peer.AdvertisesE2e || requireE2e)
+            {
+                var (fromNm, fromHst) = AgentRef.Split(from);
+                if (fromHst is not null && fromHst != Paths.Host)
+                    return Fail($"to seal, the sender must be local (need {fromNm}'s identity key to sign); '{from}' is remote");
+                var senderId = Identity.LoadOrCreate(new Address(fromNm, Paths.Host));
+                var recipientAddr = new Address(toName, toHost!);
+
+                var bundle = await Transport.GetKeys(endpoint, senderId, recipientAddr);
+                var decision = Negotiation.Outbound(peer, haveKeys: bundle is not null, requireE2e);
+                switch (decision)
+                {
+                    case OutboundDecision.Seal:
+                        // Sender-side TOFU: pin the key we just fetched via signed GET /keys. This is
+                        // first-contact sender trust (disclosed FLAG-11) and is DISTINCT from the receive-side
+                        // inbox-pin forbidden in #20 — that one lets any inbound sender establish a pin; this
+                        // one pins a key WE chose to fetch for a peer WE chose to seal to.
+                        var pinResult = new PinStore().Offer(bundle!);
+                        if (pinResult == PinResult.RejectedKeyMismatch)
+                            return Fail($"refusing to seal to {to}: fetched key MISMATCHES the pinned key for this peer (possible substitution). Re-pin out of band.");
+                        var sealed_ = Seal.Create(senderId, recipientAddr, bundle!.IdentPub, bundle.KeyEpoch,
+                            NewMsgId(), System.Text.Encoding.UTF8.GetBytes(body), contentType: "text/markdown");
+                        result = await Transport.SendSealed(endpoint, config.EffectiveToken, sealed_);
+                        sealedSend = result.ok;
+                        if (result.ok) Console.WriteLine($"sealed {sealed_.MsgId} -> {to} via {endpoint}  ({result.detail})");
+                        break;
+                    case OutboundDecision.HoldNoKeys:
+                        return Fail($"HOLD: {to} advertises e2e but its keys are unavailable (GET /keys returned none). NOT downgrading to plaintext. Retry when keys are reachable.");
+                    case OutboundDecision.RefuseRequireE2e:
+                        return Fail($"REFUSE: --require-e2e set for {to} but no keys available. Not sending plaintext.");
+                    default:
+                        result = await Transport.SendInbox(endpoint, config.EffectiveToken, env);
+                        break;
+                }
+            }
+            else
+            {
+                result = await Transport.SendInbox(endpoint, config.EffectiveToken, env);
+            }
+            var (ok, detail) = result;
+            if (!ok) return Fail($"remote delivery to {to} via {endpoint} failed: {detail}");
+
+            // keep a local outbox copy when the sender is on this host (the plaintext form; the sealed body is
+            // ephemeral by design). The "sealed <msg_id>" line already printed for the sealed path.
+            var (fn, fh) = AgentRef.Split(from);
+            if (fh is null || fh == Paths.Host) { Paths.EnsureAgent(fn); Io.WriteAtomic(Path.Combine(Paths.Outbox(fn), env.FileName), env.Serialize()); }
+            if (!sealedSend) Console.WriteLine($"delivered {env.Id} -> {to} via {endpoint}  ({detail})");
+            return 0;
+        }
+
+        var target = DirectoryStore.Resolve(toName, Paths.Host);
+        string deliverName = target?.Agent ?? toName;
+        if (target is null)
+            Console.Error.WriteLine($"note: no agent '{toName}' on host '{Paths.Host}' — delivering anyway.");
+        else if (!string.Equals(target.Agent, toName, StringComparison.OrdinalIgnoreCase))
+            Console.Error.WriteLine($"note: '{toName}' is an alias of '{target.Agent}' — delivering there.");
+
+        Paths.EnsureAgent(deliverName);
+        Io.WriteAtomic(Path.Combine(Paths.Inbox(deliverName), env.FileName), env.Serialize());
+
+        // Keep a copy in the sender's outbox when the sender is local.
+        var (fromName, fromHost) = AgentRef.Split(from);
+        if (fromHost is null || fromHost == Paths.Host)
+        {
+            Paths.EnsureAgent(fromName);
+            Io.WriteAtomic(Path.Combine(Paths.Outbox(fromName), env.FileName), env.Serialize());
+        }
+
+        Console.WriteLine($"delivered {env.Id} -> {deliverName}@{Paths.Host}  ({Path.Combine(Paths.Inbox(deliverName), env.FileName)})");
+        return 0;
+    }
+
+    /// <summary>
+    /// Capabilities THIS binary supports, one per line. The watcher probes this before globbing *.msg.json
+    /// (FLAG-9.4): a binary that prints `msg-json` can parse enc envelopes, so pairing it with a watcher that
+    /// feeds it json is safe. A legacy binary lacks the verb entirely, so the watcher stays *.msg.md-only —
+    /// which is what keeps the binary + watcher an atomic per-node deploy unit (FLAG-9.1), never a split.
+    /// </summary>
+    static int Caps()
+    {
+        foreach (var c in Capabilities.All) Console.WriteLine(c);
+        return 0;
+    }
+
+    /// <summary>The tool version. Deploy/rollout tooling greps this to confirm a box carries a given build
+    /// (e.g. >= 0.4.1 for the #8 directory fix) — a restart alone is a no-op on a pinned tool, so "did the
+    /// update take" must be checkable.</summary>
+    static int Version()
+    {
+        var info = System.Reflection.Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(Program_).Assembly.GetName().Version?.ToString() ?? "unknown";
+        // InformationalVersion is "0.4.2+<full-sha>". Print "0.4.2 (<short-sha>)" so a deploy can tell two
+        // same-version builds apart (Finding 1) — 0.4.1 spanned #14..#23 and tool-update no-op'd between them.
+        var parts = info.Split('+');
+        string semver = parts[0];
+        string sha = parts.Length > 1 ? parts[1][..Math.Min(12, parts[1].Length)] : "no-sha";
+        Console.WriteLine($"{semver} ({sha})");
+        return 0;
+    }
+
+    // fetch-keys --to Y@host --as X   — signed GET /keys, authenticated to X's identity (brief PR1.4)
+    static async Task<int> FetchKeys(Cli cli)
+    {
+        var (toName, toHost) = AgentRef.Split(cli.Require("to"));
+        if (toHost is null) return Fail("fetch-keys needs a fully-qualified --to agent@host");
+        string asName = cli.Get("as") ?? throw new CliError("fetch-keys needs --as <local-agent> to sign the request");
+
+        var requester = Identity.LoadOrCreate(new Address(asName, Paths.Host));
+        var target = new Address(toName, toHost);
+
+        // Resolve the target's relay: an explicit --endpoint wins (operator pointing at a specific relay),
+        // otherwise the advertised endpoints, first that answers — same as send.
+        var config = Config.Load();
+        var rec = DirectoryStore.Get(toName, toHost);
+        var candidates = cli.Get("endpoint") is { } ep0
+            ? new List<string> { ep0 }
+            : rec?.Endpoints.Count > 0 ? new List<string>(rec.Endpoints) : new();
+        if (candidates.Count == 0)
+        {
+            var ts = Paths.Tailscale;
+            candidates.Add($"http://{(ts.Tailnet is { } s ? $"{toHost}.{s}" : toHost)}:{config.Port}");
+        }
+
+        foreach (var ep in candidates)
+        {
+            if (!await Transport.Probe(ep)) continue;
+            var bundle = await Transport.GetKeys(ep, requester, target);
+            if (bundle is null) { Console.Error.WriteLine($"note: {ep} returned no keys for {target.Key} (404 or auth-refused)"); continue; }
+            if (!bundle.VerifySelfSignature()) return Fail($"fetched bundle for {target.Key} FAILED self-signature verification");
+            Console.WriteLine($"{target.Key}\tkey_id={bundle.KeyId}\tkey_epoch={bundle.KeyEpoch}\trecord_epoch={bundle.RecordEpoch}\tvia {ep}");
+            return 0;
+        }
+        return Fail($"fetch-keys {target.Key}: no reachable endpoint served a bundle (tried {string.Join(", ", candidates)})");
+    }
+
+    // resolve Y   (positional) or resolve --to Y
+    static int Resolve(Cli cli)
+    {
+        string target = cli.Get("to") ?? throw new CliError("usage: agentmail resolve --to <agent[@host]>");
+        var (name, host) = AgentRef.Split(target);
+        var matches = host is null
+            ? DirectoryStore.FindByName(name)
+            : DirectoryStore.Get(name, host) is { } r ? new List<AgentRecord> { r } : new();
+
+        if (matches.Count == 0) { Console.WriteLine($"no record for '{target}'"); return 1; }
+        foreach (var m in matches)
+        {
+            bool isLocal = DirectoryStore.IsLocal(m);
+            bool stale = DirectoryStore.IsStale(m);
+            // Report FRESHNESS, not Status. Status is self-asserted at register and never goes false, so
+            // printing it alone told operators "online" about agents unroutable for 37h (#8).
+            Console.WriteLine($"{m.Key}\t{(stale ? "STALE" : m.Status)}\t{(isLocal ? "local" : "remote")}\t{m.Endpoint}\tinbox={Paths.Inbox(m.Agent)}");
+            if (stale)
+                Console.Error.WriteLine(
+                    $"note: {m.Key} last_seen {m.LastSeen} (older than {DirectoryStore.StaleAfter.TotalHours:0}h) — " +
+                    $"its record still says '{m.Status}', but that field is never refreshed. Not trusted for routing.");
+        }
+        return 0;
+    }
+
+    // agents [--host H]   H = a host name (resolved via MagicDNS) or a full http://... endpoint
+    static async Task<int> Agents(Cli cli)
+    {
+        List<AgentRecord>? all;
+        if (cli.Get("host") is { } host)
+        {
+            string endpoint = host.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                ? host
+                : $"http://{(Paths.Tailscale.Tailnet is { } s ? $"{host}.{s}" : host)}:{Config.Load().Port}";
+            all = await Transport.GetAgents(endpoint);
+            if (all is null) return Fail($"could not reach {endpoint}/agents");
+        }
+        else
+        {
+            all = DirectoryStore.All().ToList();
+        }
+
+        all = all.OrderBy(r => r.Key, StringComparer.OrdinalIgnoreCase).ToList();
+        if (all.Count == 0) { Console.WriteLine("(no agents)"); return 0; }
+        // AGE is computed from last_seen and is the real signal; STATUS is self-asserted at register and never
+        // refreshed, so it stays "online" forever. Showing them side by side makes the divergence visible
+        // instead of letting an operator read "online" off a record that has been unroutable for 37h (#8).
+        var now = DateTime.UtcNow;
+        Console.WriteLine($"{"AGENT@HOST",-30} {"USER",-12} {"STATUS",-8} {"AGE",-9} {"VER",-5} LAST_SEEN");
+        foreach (var r in all)
+        {
+            string age = DirectoryStore.TryParseLastSeen(r, out var seen)
+                ? $"{(now - seen).TotalHours,6:0.0}h" + (DirectoryStore.IsStale(r, now) ? "!" : " ")
+                : "    ?  ";
+            Console.WriteLine($"{r.Key,-30} {r.User,-12} {r.Status,-8} {age,-9} v{r.Version,-4} {r.LastSeen}");
+        }
+        int stale = all.Count(r => DirectoryStore.IsStale(r, now));
+        if (stale > 0)
+            Console.Error.WriteLine(
+                $"note: {stale} of {all.Count} record(s) are STALE (marked !) — last_seen older than " +
+                $"{DirectoryStore.StaleAfter.TotalHours:0}h. They are NOT trusted for routing regardless of STATUS.");
+        return 0;
+    }
+
+    static int Help()
+    {
+        Console.WriteLine("""
+            agentmail — asynchronous agent messaging
+
+            USAGE
+              agentmail register --name <X> [--user <U>] [--port <P>] [--offline]
+              agentmail send --to <Y[@host]> --from <X> [--subject <S>] [--body <text>|-] [--reply-to <R>]
+              agentmail resolve --to <Y[@host]>
+              agentmail agents
+              agentmail serve [--port <P>]            (Phase 2)
+
+            NOTES
+              Names route as agent@host (host = Tailscale MagicDNS short name).
+              --body -  reads the message body from stdin.
+              Data lives under ~/.claude/agentmail/.
+            """);
+        return 0;
+    }
+
+    static int Fail(string message)
+    {
+        Console.Error.WriteLine($"error: {message}");
+        return 1;
+    }
+}
