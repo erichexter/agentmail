@@ -24,19 +24,33 @@ sealed class TailscaleInfo
 
     public static TailscaleInfo Detect()
     {
-        // Try each candidate binary path until one yields a status. On Windows the CLI is NOT on PATH by
-        // default (it lives under Program Files), so a bare "tailscale" invocation fails there — and the
-        // MachineName fallback returns the 15-char-truncated NetBIOS name (e.g. "eric-aliya-lapt"), which
-        // then MISMATCHES the full MagicDNS name the directory advertises ("eric-aliya-laptop") and 404s all
-        // inbound mail. Finding the real binary keeps the relay's self-host equal to its published name.
-        foreach (var exe in BinaryCandidates())
-        {
-            var info = TryDetect(exe);
-            if (info is not null) return info;
-        }
-        return new TailscaleInfo { Host = MachineName() };
+        // Two failure modes both used to fall through to the machine name — which on Windows is the NetBIOS
+        // name, hard-capped at 15 chars (e.g. "eric-aliya-laptop" -> "eric-aliya-lapt"). Because Paths.Host
+        // caches the first Detect() for the whole process AND that name is persisted into the gossip directory,
+        // a single miss permanently split an agent into a truncated ghost record that 404s inbound mail. Guard
+        // BOTH modes before falling back:
+        //   (a) the CLI is off-PATH on Windows (under Program Files) -> try known binary locations;
+        //   (b) `tailscale status` is transiently slow/wedged -> retry with a real deadline.
+        for (int attempt = 0; attempt < 3; attempt++)
+            foreach (var exe in BinaryCandidates())
+            {
+                var info = TryDetect(exe);
+                if (info is not null) return info;
+            }
+
+        string machine = MachineName();
+        Console.Error.WriteLine(
+            "agentmail: WARNING - `tailscale status` unavailable; falling back to machine name '" + machine + "'."
+            + (machine.Length >= 15
+                ? " This may be NetBIOS-truncated (>=15 chars) and can MISROUTE. Set AGENTMAIL_HOST to the full host name."
+                : " Set AGENTMAIL_HOST to pin a stable routing name."));
+        return new TailscaleInfo { Host = machine };
     }
 
+    /// <summary>One attempt to read this host's identity from `tailscale status --json` at a given binary path.
+    /// Returns null on any failure (wrong path, non-zero exit, timeout, or JSON without a Self short name) so the
+    /// caller can try the next candidate or retry. Reads stdout asynchronously and kills the child on timeout so
+    /// the deadline is real — a blocking ReadToEnd would wait until the child exits anyway, defeating it.</summary>
     private static TailscaleInfo? TryDetect(string exe)
     {
         try
@@ -51,9 +65,11 @@ sealed class TailscaleInfo
             using var p = Process.Start(psi);
             if (p is null) return null;
 
-            string json = p.StandardOutput.ReadToEnd();
-            p.WaitForExit(3000);
-            if (!p.HasExited || p.ExitCode != 0 || json.Length == 0) return null;
+            var stdoutTask = p.StandardOutput.ReadToEndAsync();
+            if (!p.WaitForExit(6000)) { try { p.Kill(entireProcessTree: true); } catch { /* best effort */ } return null; }
+            if (p.ExitCode != 0) return null;
+            string json = stdoutTask.GetAwaiter().GetResult();
+            if (json.Length == 0) return null;
 
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
@@ -62,12 +78,13 @@ sealed class TailscaleInfo
 
             string full = (self.TryGetProperty("DNSName", out var dns) ? dns.GetString() : null)?.TrimEnd('.') ?? "";
             string shortName = full.Split('.', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+            if (shortName.Length == 0) return null;
+
             string? ip = null;
             if (self.TryGetProperty("TailscaleIPs", out var ips) && ips.ValueKind == JsonValueKind.Array)
                 foreach (var e in ips.EnumerateArray())
                     if (e.GetString() is { } s && s.Contains('.')) { ip = s; break; } // IPv4
 
-            if (shortName.Length == 0) return null;
             return new TailscaleInfo
             {
                 Host = shortName.ToLowerInvariant(),
@@ -78,7 +95,7 @@ sealed class TailscaleInfo
         }
         catch
         {
-            return null;   // this candidate isn't it — try the next
+            return null;   // this candidate isn't it / transient error — caller tries the next or retries
         }
     }
 
