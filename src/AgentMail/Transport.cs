@@ -15,14 +15,33 @@ static class Transport
         return req;
     }
 
+    /// <summary>
+    /// Judge a relay response. A 2xx is NOT sufficient: the FLAG-32/38 CapabilityGate accepts a plaintext
+    /// envelope for an e2e recipient with <c>202 Accepted</c> and then QUARANTINES it — the message is written
+    /// to the recipient's quarantine/ directory and never reaches their inbox. Treating that 202 as success
+    /// reports delivery for a message the recipient will never see, which is the same silent-failure class as
+    /// the phantom-inbox bug. The reason is only in the body, so the body has to be read.
+    /// Kept as a body check rather than changing the relay's status code, so a new sender stays compatible
+    /// with older relays already deployed across the fleet.
+    /// </summary>
+    internal static (bool ok, string detail) Judge(int status, string? reason, string body)
+    {
+        string detail = $"{status} {reason} {body}".Trim();
+        bool http2xx = status is >= 200 and < 300;
+        if (http2xx && body.Contains("\"quarantined\"", StringComparison.OrdinalIgnoreCase))
+            return (false, $"QUARANTINED, not delivered — the relay accepted then quarantined this message " +
+                           $"and the recipient will not see it. {detail}");
+        return (http2xx, detail);
+    }
+
     public static async Task<(bool ok, string detail)> SendInbox(string endpoint, string token, Envelope env)
     {
         try
         {
             using var req = Auth(HttpMethod.Post, $"{endpoint}/inbox", token, JsonContent.Create(env, options: Paths.Json));
             using var res = await Http.SendAsync(req);
-            string detail = await res.Content.ReadAsStringAsync();
-            return (res.IsSuccessStatusCode, $"{(int)res.StatusCode} {res.ReasonPhrase} {detail}".Trim());
+            string body = await res.Content.ReadAsStringAsync();
+            return Judge((int)res.StatusCode, res.ReasonPhrase, body);
         }
         catch (Exception e) { return (false, e.Message); }
     }
@@ -35,8 +54,8 @@ static class Transport
         {
             using var req = Auth(HttpMethod.Post, $"{endpoint}/inbox", token, JsonContent.Create(env, options: Paths.Json));
             using var res = await Http.SendAsync(req);
-            string detail = await res.Content.ReadAsStringAsync();
-            return (res.IsSuccessStatusCode, $"{(int)res.StatusCode} {res.ReasonPhrase} {detail}".Trim());
+            string body = await res.Content.ReadAsStringAsync();
+            return Judge((int)res.StatusCode, res.ReasonPhrase, body);
         }
         catch (Exception e) { return (false, e.Message); }
     }

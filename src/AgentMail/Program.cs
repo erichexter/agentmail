@@ -226,10 +226,28 @@ static class Program_
         }
 
         var target = DirectoryStore.Resolve(toName, Paths.Host);
-        string deliverName = target?.Agent ?? toName;
         if (target is null)
-            Console.Error.WriteLine($"note: no agent '{toName}' on host '{Paths.Host}' — delivering anyway.");
-        else if (!string.Equals(target.Agent, toName, StringComparison.OrdinalIgnoreCase))
+        {
+            // A bare name that resolves to NO agent on this host used to be written into a freshly-created
+            // local directory and reported as delivered (exit 0). For a name that actually lives on another
+            // host that is silent data loss: the message never routes, the sender is told it succeeded, and
+            // nothing surfaces it. Observed in the wild — 32 messages across three weeks on one node, 22 of
+            // them one agent's, including a 38-minute exchange answered into a phantom directory.
+            // Refuse instead, and if the name is known elsewhere, name the address that would have worked.
+            var elsewhere = DirectoryStore.FindByName(toName)
+                .Where(r => !string.Equals(r.Host, Paths.Host, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (elsewhere.Count > 0)
+                return Fail(
+                    $"'{toName}' is not on this host ('{Paths.Host}') — it lives on " +
+                    string.Join(", ", elsewhere.Select(r => $"'{r.Host}'")) + ". " +
+                    $"A bare name is never routed off-box. Retry fully qualified: --to {toName}@{elsewhere[0].Host}");
+            return Fail(
+                $"no agent '{toName}' on host '{Paths.Host}', and no agent by that name is known on any host. " +
+                $"Check `agentmail agents`, or register it first. (Refusing to write to an unrouted local inbox.)");
+        }
+        string deliverName = target.Agent;
+        if (!string.Equals(target.Agent, toName, StringComparison.OrdinalIgnoreCase))
             Console.Error.WriteLine($"note: '{toName}' is an alias of '{target.Agent}' — delivering there.");
 
         Paths.EnsureAgent(deliverName);
