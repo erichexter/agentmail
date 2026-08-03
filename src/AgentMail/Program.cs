@@ -164,25 +164,45 @@ static class Program_
                 var recipientAddr = new Address(toName, toHost!);
 
                 var bundle = await Transport.GetKeys(endpoint, senderId, recipientAddr);
-                var decision = Negotiation.Outbound(peer, haveKeys: bundle is not null, requireE2e);
+
+                // Resolve the seal key. Prefer the freshly-fetched bundle and (sender-side TOFU) pin it. But if
+                // the relay serves NO keys — this fleet's relays store pubkey:null and distribute identity keys
+                // out-of-band — fall back to a key we have ALREADY PINNED for this peer (pki/pinned + an
+                // established epoch). That is NOT a downgrade: we only ever seal to a key we already trust,
+                // exactly as the receive side already trusts the pinned key (Relay.cs). Without this, a keyless
+                // relay makes every send to an e2e peer HOLD forever even when we hold their identity key.
+                byte[]? sealIdentPub = null;
+                uint sealKeyEpoch = 0;
+                if (bundle is not null)
+                {
+                    var pinResult = new PinStore().Offer(bundle);
+                    if (pinResult == PinResult.RejectedKeyMismatch)
+                        return Fail($"refusing to seal to {to}: fetched key MISMATCHES the pinned key for this peer (possible substitution). Re-pin out of band.");
+                    sealIdentPub = bundle.IdentPub;
+                    sealKeyEpoch = bundle.KeyEpoch;
+                }
+                else
+                {
+                    var pinned = new PinStore().Get(recipientAddr);
+                    if (pinned is not null && pinned.IdentPub.Length > 0)
+                    {
+                        sealIdentPub = pinned.IdentPub;
+                        sealKeyEpoch = pinned.KeyEpoch;
+                    }
+                }
+
+                var decision = Negotiation.Outbound(peer, haveKeys: sealIdentPub is not null, requireE2e);
                 switch (decision)
                 {
                     case OutboundDecision.Seal:
-                        // Sender-side TOFU: pin the key we just fetched via signed GET /keys. This is
-                        // first-contact sender trust (disclosed FLAG-11) and is DISTINCT from the receive-side
-                        // inbox-pin forbidden in #20 — that one lets any inbound sender establish a pin; this
-                        // one pins a key WE chose to fetch for a peer WE chose to seal to.
-                        var pinResult = new PinStore().Offer(bundle!);
-                        if (pinResult == PinResult.RejectedKeyMismatch)
-                            return Fail($"refusing to seal to {to}: fetched key MISMATCHES the pinned key for this peer (possible substitution). Re-pin out of band.");
-                        var sealed_ = Seal.Create(senderId, recipientAddr, bundle!.IdentPub, bundle.KeyEpoch,
+                        var sealed_ = Seal.Create(senderId, recipientAddr, sealIdentPub!, sealKeyEpoch,
                             NewMsgId(), System.Text.Encoding.UTF8.GetBytes(body), contentType: "text/markdown");
                         result = await Transport.SendSealed(endpoint, config.EffectiveToken, sealed_);
                         sealedSend = result.ok;
                         if (result.ok) Console.WriteLine($"sealed {sealed_.MsgId} -> {to} via {endpoint}  ({result.detail})");
                         break;
                     case OutboundDecision.HoldNoKeys:
-                        return Fail($"HOLD: {to} advertises e2e but its keys are unavailable (GET /keys returned none). NOT downgrading to plaintext. Retry when keys are reachable.");
+                        return Fail($"HOLD: {to} advertises e2e but its keys are unavailable (GET /keys returned none, and no pinned key on file). NOT downgrading to plaintext. Retry when keys are reachable.");
                     case OutboundDecision.RefuseRequireE2e:
                         return Fail($"REFUSE: --require-e2e set for {to} but no keys available. Not sending plaintext.");
                     default:
