@@ -106,11 +106,9 @@ public class ResolveOrderingTests
         Agent = "harrell", Host = host, LastSeen = seen.ToString("yyyy-MM-ddTHH:mm:ssZ"),
     };
 
-    static List<AgentRecord> Ordered(IEnumerable<AgentRecord> src) => src
-        .OrderByDescending(r => DirectoryStore.IsLocal(r))
-        .ThenBy(r => DirectoryStore.IsStale(r))
-        .ThenByDescending(r => DirectoryStore.TryParseLastSeen(r, out var t) ? t : DateTime.MinValue)
-        .ToList();
+    // Exercise the SHARED comparator, not a copy of it — a test that reimplements the rule cannot catch
+    // the rule drifting, which is the whole failure mode here (three sites, three copies, three bugs).
+    static List<AgentRecord> Ordered(IEnumerable<AgentRecord> src) => DirectoryStore.ByRoutability(src);
 
     [Fact]
     public void The_fresh_host_leads_even_when_the_stale_one_enumerates_first()

@@ -54,9 +54,40 @@ static class DirectoryStore
         catch { return null; }
     }
 
-    /// <summary>Find every record for a bare agent name or alias (any host).</summary>
+    /// <summary>
+    /// Find every record for a bare agent name or alias (any host), in FILESYSTEM ORDER.
+    ///
+    /// ⚠ DO NOT TAKE <c>[0]</c> OF THIS. Filesystem order is not routability order, and a name commonly has
+    /// more than one record — a live host plus a truncated/renamed leftover. On 2026-08-03 that assumption
+    /// was wrong in three separate places in one afternoon: the bare-name send guard, the refusal hint that
+    /// tells a sender the address that would have worked, and <c>resolve</c> itself. Each confidently named
+    /// a host nothing arrives at, which is the exact failure the guard exists to prevent.
+    ///
+    /// Call <see cref="ByRoutability"/> instead, or order with it. If you need the single best record,
+    /// <c>ByRoutability(FindByName(x)).FirstOrDefault()</c>.
+    /// </summary>
     public static List<AgentRecord> FindByName(string agent) =>
         All().Where(r => Matches(r, agent)).ToList();
+
+    /// <summary>
+    /// THE one way to rank candidate records for a name. Local first (a relay always knows the agents it
+    /// hosts, so its own record is authoritative), then fresh before stale, then most-recently-seen.
+    ///
+    /// This exists so the rule is inherited rather than rediscovered. It was rediscovered three times in a
+    /// single afternoon — each time as a defect, each time found by a different peer during rollout — because
+    /// it lived only in the head of whoever last wrote a lookup. If you are adding a fourth lookup, use this
+    /// rather than reimplementing the comparator; if this rule is ever wrong, fix it HERE and every caller
+    /// inherits the fix.
+    ///
+    /// Note freshness is <see cref="IsStale"/>, never <see cref="AgentRecord.Status"/> — Status is
+    /// self-asserted at register and never goes false.
+    /// </summary>
+    public static List<AgentRecord> ByRoutability(IEnumerable<AgentRecord> records, DateTime? nowUtc = null) =>
+        records
+            .OrderByDescending(r => IsLocal(r))
+            .ThenBy(r => IsStale(r, nowUtc))
+            .ThenByDescending(r => TryParseLastSeen(r, out var seen) ? seen : DateTime.MinValue)
+            .ToList();
 
     private static bool Matches(AgentRecord r, string name) =>
         string.Equals(r.Agent, name, StringComparison.OrdinalIgnoreCase) ||

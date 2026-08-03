@@ -245,16 +245,13 @@ static class Program_
                 // (v2, last_seen 11 days old), and the suggestion named the dead one. Prefer FRESH records, and
                 // among them the most recently seen; fall back to stale ones only if nothing fresh exists, and
                 // say so rather than presenting a stale guess as an address.
-                static DateTime Seen(AgentRecord r) =>
-                    DirectoryStore.TryParseLastSeen(r, out var t) ? t : DateTime.MinValue;
-
-                var fresh = elsewhere.Where(r => !DirectoryStore.IsStale(r)).OrderByDescending(Seen).ToList();
-                var best = (fresh.Count > 0 ? fresh : elsewhere.OrderByDescending(Seen).ToList())[0];
-                string hosts = string.Join(", ", elsewhere.OrderByDescending(Seen)
+                var ranked = DirectoryStore.ByRoutability(elsewhere);
+                var best = ranked[0];
+                string hosts = string.Join(", ", ranked
                     .Select(r => $"'{r.Host}'" + (DirectoryStore.IsStale(r) ? " (stale)" : "")));
                 // ASCII only: a non-ASCII glyph mangles on the Windows console (verified — the ⚠ rendered as '?'),
                 // and a warning nobody can read is not a warning.
-                string caveat = fresh.Count == 0
+                string caveat = !ranked.Any(r => !DirectoryStore.IsStale(r))
                     ? " WARNING: every record for this name is STALE - verify the host before trusting this."
                     : "";
                 return Fail(
@@ -364,14 +361,7 @@ static class Program_
         // a human skimming, or a script doing `resolve | head -1`. Leading with a stale truncated record
         // hands back a host nothing arrives at, footnote or no footnote. Same ordering assumption that made
         // the bare-name refusal hint name a dead host (found by maverick@desktop-bqgtlc4-7); same fix.
-        // Local first (a relay always knows its own), then fresh, then most-recently-seen.
-        static DateTime Seen(AgentRecord r) =>
-            DirectoryStore.TryParseLastSeen(r, out var t) ? t : DateTime.MinValue;
-        matches = matches
-            .OrderByDescending(r => DirectoryStore.IsLocal(r))
-            .ThenBy(r => DirectoryStore.IsStale(r))
-            .ThenByDescending(r => Seen(r))
-            .ToList();
+        matches = DirectoryStore.ByRoutability(matches);
 
         foreach (var m in matches)
         {
