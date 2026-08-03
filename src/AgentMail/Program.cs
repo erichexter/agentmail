@@ -238,10 +238,29 @@ static class Program_
                 .Where(r => !string.Equals(r.Host, Paths.Host, StringComparison.OrdinalIgnoreCase))
                 .ToList();
             if (elsewhere.Count > 0)
+            {
+                // The hint must never point at a host nothing arrives at — that is the failure this whole
+                // change exists to remove, and picking elsewhere[0] blindly reproduced it: on desktop-bqgtlc4-7
+                // 'harrell' resolved to BOTH the live 'eric-aliya-laptop' and a stale truncated 'eric-aliya-lapt'
+                // (v2, last_seen 11 days old), and the suggestion named the dead one. Prefer FRESH records, and
+                // among them the most recently seen; fall back to stale ones only if nothing fresh exists, and
+                // say so rather than presenting a stale guess as an address.
+                static DateTime Seen(AgentRecord r) =>
+                    DirectoryStore.TryParseLastSeen(r, out var t) ? t : DateTime.MinValue;
+
+                var fresh = elsewhere.Where(r => !DirectoryStore.IsStale(r)).OrderByDescending(Seen).ToList();
+                var best = (fresh.Count > 0 ? fresh : elsewhere.OrderByDescending(Seen).ToList())[0];
+                string hosts = string.Join(", ", elsewhere.OrderByDescending(Seen)
+                    .Select(r => $"'{r.Host}'" + (DirectoryStore.IsStale(r) ? " (stale)" : "")));
+                // ASCII only: a non-ASCII glyph mangles on the Windows console (verified — the ⚠ rendered as '?'),
+                // and a warning nobody can read is not a warning.
+                string caveat = fresh.Count == 0
+                    ? " WARNING: every record for this name is STALE - verify the host before trusting this."
+                    : "";
                 return Fail(
-                    $"'{toName}' is not on this host ('{Paths.Host}') — it lives on " +
-                    string.Join(", ", elsewhere.Select(r => $"'{r.Host}'")) + ". " +
-                    $"A bare name is never routed off-box. Retry fully qualified: --to {toName}@{elsewhere[0].Host}");
+                    $"'{toName}' is not on this host ('{Paths.Host}') — it lives on {hosts}. " +
+                    $"A bare name is never routed off-box. Retry fully qualified: --to {toName}@{best.Host}{caveat}");
+            }
             return Fail(
                 $"no agent '{toName}' on host '{Paths.Host}', and no agent by that name is known on any host. " +
                 $"Check `agentmail agents`, or register it first. (Refusing to write to an unrouted local inbox.)");
