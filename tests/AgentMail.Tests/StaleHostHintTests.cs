@@ -91,3 +91,55 @@ public class StaleHostHintTests
         Assert.True(DirectoryStore.IsStale(junk));
     }
 }
+
+/// <summary>
+/// `resolve` is the command you run to FIND OUT where to send, so its first line is the answer most
+/// callers take — a human skimming, or a script doing `resolve | head -1`. It used to print in directory
+/// enumeration order, which led with the stale truncated record and handed back a host nothing arrives
+/// at. Found by steele during the 15a808d rollout: the same ordering assumption maverick found in the
+/// refusal hint, in the command whose whole job is answering "where?".
+/// </summary>
+public class ResolveOrderingTests
+{
+    static AgentRecord Rec(string host, DateTime seen) => new()
+    {
+        Agent = "harrell", Host = host, LastSeen = seen.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+    };
+
+    static List<AgentRecord> Ordered(IEnumerable<AgentRecord> src) => src
+        .OrderByDescending(r => DirectoryStore.IsLocal(r))
+        .ThenBy(r => DirectoryStore.IsStale(r))
+        .ThenByDescending(r => DirectoryStore.TryParseLastSeen(r, out var t) ? t : DateTime.MinValue)
+        .ToList();
+
+    [Fact]
+    public void The_fresh_host_leads_even_when_the_stale_one_enumerates_first()
+    {
+        // 'eric-aliya-lapt' sorts before 'eric-aliya-laptop' on disk — the exact case steele hit.
+        var stale = Rec("eric-aliya-lapt", DateTime.UtcNow.AddDays(-11));
+        var live = Rec("some-other-host", DateTime.UtcNow.AddMinutes(-2));
+
+        var first = Ordered(new[] { stale, live })[0];
+
+        Assert.Equal("some-other-host", first.Host);
+        Assert.False(DirectoryStore.IsStale(first));
+    }
+
+    [Fact]
+    public void All_stale_still_leads_with_the_least_old()
+    {
+        var older = Rec("windev2407eval", DateTime.UtcNow.AddDays(-17));
+        var newer = Rec("wolf-prime", DateTime.UtcNow.AddDays(-5));
+
+        Assert.Equal("wolf-prime", Ordered(new[] { older, newer })[0].Host);
+    }
+
+    [Fact]
+    public void Ordering_is_stable_when_every_candidate_is_fresh()
+    {
+        var a = Rec("host-a", DateTime.UtcNow.AddHours(-3));
+        var b = Rec("host-b", DateTime.UtcNow.AddMinutes(-1));
+
+        Assert.Equal("host-b", Ordered(new[] { a, b })[0].Host);   // most recent wins
+    }
+}

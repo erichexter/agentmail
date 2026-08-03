@@ -358,6 +358,21 @@ static class Program_
             : DirectoryStore.Get(name, host) is { } r ? new List<AgentRecord> { r } : new();
 
         if (matches.Count == 0) { Console.WriteLine($"no record for '{target}'"); return 1; }
+
+        // Order by ROUTABILITY, not by whatever order the directory happened to enumerate. `resolve` is the
+        // command you run to find out where to send, so its FIRST LINE is the answer most callers take —
+        // a human skimming, or a script doing `resolve | head -1`. Leading with a stale truncated record
+        // hands back a host nothing arrives at, footnote or no footnote. Same ordering assumption that made
+        // the bare-name refusal hint name a dead host (found by maverick@desktop-bqgtlc4-7); same fix.
+        // Local first (a relay always knows its own), then fresh, then most-recently-seen.
+        static DateTime Seen(AgentRecord r) =>
+            DirectoryStore.TryParseLastSeen(r, out var t) ? t : DateTime.MinValue;
+        matches = matches
+            .OrderByDescending(r => DirectoryStore.IsLocal(r))
+            .ThenBy(r => DirectoryStore.IsStale(r))
+            .ThenByDescending(r => Seen(r))
+            .ToList();
+
         foreach (var m in matches)
         {
             bool isLocal = DirectoryStore.IsLocal(m);
