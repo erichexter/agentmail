@@ -41,6 +41,29 @@ static class Program_
     static async Task<int> Register(Cli cli)
     {
         string name = cli.Require("name");
+
+        // FLAG-41: register must not mint a name the sealed path will later refuse. AssertLdh is the
+        // SAME gate Seal.Create applies to from.name / to.name, so a name accepted here but rejected
+        // there produces an agent that is unaddressable in BOTH directions the moment sealing arms —
+        // and it stays invisible until then, because plaintext never touches Identity. Reject at the
+        // door, with the fix in the message, rather than at first encrypted send.
+        // Deliberately REJECT rather than lowercase: PreImage's contract is "reject, never normalize"
+        // (P2-K / FLAG-6), and silently registering 'Elrond' as 'elrond' would hand the operator a
+        // name they did not choose and did not see.
+        try { PreImage.AssertLdh(name, "agent name"); }
+        catch (NonConformingFieldException)
+        {
+            string suggestion = new string(name.ToLowerInvariant()
+                .Where(c => (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-').ToArray())
+                .Trim('-');
+            return Fail(
+                $"'{name}' is not a usable agent name — it must be lowercase letters, digits and hyphens " +
+                $"only, with no leading or trailing hyphen. This is the same rule the encrypted transport " +
+                $"enforces, so registering it would create an agent nobody could send to or from once " +
+                $"sealing engages." +
+                (suggestion.Length > 0 ? $" Try: --name {suggestion}" : ""));
+        }
+
         var config = Config.Load();
         if (cli.Get("user") is { } u) config.User = u;
         if (cli.Get("port") is { } p && int.TryParse(p, out int port)) config.Port = port;
@@ -195,8 +218,23 @@ static class Program_
                 switch (decision)
                 {
                     case OutboundDecision.Seal:
-                        var sealed_ = Seal.Create(senderId, recipientAddr, sealIdentPub!, sealKeyEpoch,
-                            NewMsgId(), System.Text.Encoding.UTF8.GetBytes(body), contentType: "text/markdown");
+                        SealedEnvelope sealed_;
+                        try
+                        {
+                            // FLAG-41: a malformed name is an OPERATOR error, not a crash. Seal.Create
+                            // asserts LDH on both addresses; letting that escape printed a stack trace
+                            // and made a name-shape problem look like a broken binary.
+                            sealed_ = Seal.Create(senderId, recipientAddr, sealIdentPub!, sealKeyEpoch,
+                                NewMsgId(), System.Text.Encoding.UTF8.GetBytes(body), contentType: "text/markdown");
+                        }
+                        catch (NonConformingFieldException ex)
+                        {
+                            return Fail(
+                                $"cannot seal to {to}: {ex.Field} = '{ex.Value}' is not a usable name " +
+                                $"(lowercase letters, digits, hyphens; no leading/trailing hyphen). " +
+                                $"Whoever owns that name must re-register it in a conforming form — " +
+                                $"it is unaddressable on the encrypted path until they do.");
+                        }
                         result = await Transport.SendSealed(endpoint, config.EffectiveToken, sealed_);
                         sealedSend = result.ok;
                         if (result.ok) Console.WriteLine($"sealed {sealed_.MsgId} -> {to} via {endpoint}  ({result.detail})");
