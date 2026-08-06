@@ -8,6 +8,10 @@ sealed class NonConformingFieldException(string field, string value)
     : Exception($"non_conforming_field: {field} = '{value}'")
 {
     public string Field { get; } = field;
+
+    /// <summary>The offending token itself. The CLI needs it to tell an operator WHICH name to fix —
+    /// digging it back out of Message with a regex is how that turns into a maintenance trap.</summary>
+    public string Value { get; } = value;
 }
 
 /// <summary>A materialized-with-default field carried presence 0x00 where 0x01 is required (FLAG-27.3).</summary>
