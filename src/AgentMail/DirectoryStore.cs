@@ -20,6 +20,12 @@ sealed class AgentRecord
     /// set offline, and only explicitly (`register --offline`).
     /// </summary>
     public string Status { get; set; } = "online";
+    /// <summary>
+    /// Set by `agentmail retire`. Where callers should go instead of this dead name. Null on a live record.
+    /// Distinct from Status=offline: offline means "this agent is down and may come back", retired means
+    /// "this NAME is gone forever". Collapsing the two is what let a retired name resurrect (#296).
+    /// </summary>
+    public string? Successor { get; set; }
     public long Version { get; set; }                 // bumped on every change; LWW ordering key
     public string LastSeen { get; set; } = "";        // ISO-8601 UTC
     public List<string> Capabilities { get; set; } = new();
@@ -53,6 +59,17 @@ static class DirectoryStore
         try { return JsonSerializer.Deserialize<AgentRecord>(File.ReadAllText(path), Paths.Json); }
         catch { return null; }
     }
+
+    /// A name that has been explicitly retired, as opposed to merely unreachable.
+    ///
+    /// STALE and RETIRED had been doing one job between them and they are not the same question. STALE is
+    /// "last_seen is old" -- the host may simply be off, and it comes back by itself when the host returns.
+    /// RETIRED is a decision: this name will never be valid again. A consumer rebuilding a target list from
+    /// `agentmail agents` cannot tell those apart from freshness alone, which is exactly how `ray` came back
+    /// from the dead after a reboot and got roll-called alongside its own successor (#296).
+    /// </summary>
+    public static bool IsRetired(AgentRecord r) =>
+        string.Equals(r.Status, "retired", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Find every record for a bare agent name or alias (any host), in FILESYSTEM ORDER.

@@ -17,6 +17,7 @@ static class Program_
                 "send" => await Send(cli),
                 "resolve" => Resolve(cli),
                 "agents" => await Agents(cli),
+                "retire" => Retire(cli),
                 "fetch-keys" => await FetchKeys(cli),
                 "--caps" or "caps" => Caps(),
                 "--version" or "version" => Version(),
@@ -384,6 +385,51 @@ static class Program_
     }
 
     // resolve Y   (positional) or resolve --to Y
+    // retire --name <agent[@host]> [--successor <agent[@host]>]
+    static int Retire(Cli cli)
+    {
+        string target = cli.Get("name")
+            ?? throw new CliError("usage: agentmail retire --name <agent[@host]> [--successor <agent[@host]>]");
+        var (name, host) = AgentRef.Split(target);
+        var matches = host is null
+            ? DirectoryStore.FindByName(name)
+            : DirectoryStore.Get(name, host) is { } one ? new List<AgentRecord> { one } : new();
+
+        if (matches.Count == 0) return Fail($"no record for '{target}' — nothing to retire.");
+        if (matches.Count > 1 && host is null)
+            return Fail($"'{name}' matches {matches.Count} records ({string.Join(", ", matches.Select(m => m.Key))}). " +
+                        "Retire is per-record — pass the full agent@host.");
+
+        string? successor = cli.Get("successor");
+        if (successor is not null && DirectoryStore.FindByName(AgentRef.Split(successor).name).Count == 0)
+            return Fail($"successor '{successor}' has no record. Register it before retiring '{target}' at it, " +
+                        "or the retirement would point callers at a name that resolves to nothing.");
+
+        // ByRoutability, not matches[0]. The ambiguity guard above already means exactly one record
+        // reaches here, so ordering changes nothing today — but FindByName returns FILESYSTEM order and
+        // taking [0] of it is the documented trap that named an unroutable host in three places in one
+        // afternoon. Written the safe way so it stays safe if that guard is ever relaxed.
+        var rec = DirectoryStore.ByRoutability(matches).First();
+        if (DirectoryStore.IsRetired(rec) && rec.Successor == successor)
+        {
+            Console.WriteLine($"{rec.Key} is already retired{(successor is null ? "" : $" -> {successor}")} (no change).");
+            return 0;
+        }
+
+        rec.Status = "retired";
+        rec.Successor = successor;
+        // The record stays on disk and stays RESOLVABLE on purpose: mail already in flight, addressed to the
+        // old name, still has to land. Retirement removes the name from DISCOVERY, not from delivery.
+        rec.LastSeen = NowUtc();
+        rec.Version += 1;   // advance the LWW clock so peers converge on the retirement rather than resurrect it
+        DirectoryStore.Save(rec);
+
+        Console.WriteLine($"retired {rec.Key} (v{rec.Version})" + (successor is null ? "" : $" -> {successor}"));
+        Console.WriteLine("  it is now hidden from `agentmail agents` (use --include-retired to see it)");
+        Console.WriteLine("  and still resolvable, so in-flight mail to the old name still lands.");
+        return 0;
+    }
+
     static int Resolve(Cli cli)
     {
         string target = cli.Get("to") ?? throw new CliError("usage: agentmail resolve --to <agent[@host]>");
@@ -408,6 +454,12 @@ static class Program_
             // Report FRESHNESS, not Status. Status is self-asserted at register and never goes false, so
             // printing it alone told operators "online" about agents unroutable for 37h (#8).
             Console.WriteLine($"{m.Key}\t{(stale ? "STALE" : m.Status)}\t{(isLocal ? "local" : "remote")}\t{m.Endpoint}\tinbox={Paths.Inbox(m.Agent)}");
+            // A retired name still RESOLVES so in-flight mail lands, but a caller resolving it now is about to
+            // address a name that is gone. Say so loudly, and name the successor if one was recorded.
+            if (DirectoryStore.IsRetired(m))
+                Console.Error.WriteLine(m.Successor is { } succ
+                    ? $"note: {m.Key} is RETIRED — use '{succ}' instead. Still resolvable so in-flight mail lands."
+                    : $"note: {m.Key} is RETIRED with no successor recorded. Still resolvable so in-flight mail lands.");
             if (stale)
                 Console.Error.WriteLine(
                     $"note: {m.Key} last_seen {m.LastSeen} (older than {DirectoryStore.StaleAfter.TotalHours:0}h) — " +
@@ -433,6 +485,16 @@ static class Program_
             all = DirectoryStore.All().ToList();
         }
 
+        // Retired names are EXCLUDED by default. This listing is what peers rebuild their target lists from,
+        // so leaving a retired name in it is how a dead name resurrects after a reboot and gets roll-called
+        // beside its own successor (#296). --include-retired is for humans auditing the directory.
+        int retiredHidden = 0;
+        if (!cli.Has("include-retired"))
+        {
+            retiredHidden = all.Count(DirectoryStore.IsRetired);
+            all = all.Where(r => !DirectoryStore.IsRetired(r)).ToList();
+        }
+
         all = all.OrderBy(r => r.Key, StringComparer.OrdinalIgnoreCase).ToList();
         if (all.Count == 0) { Console.WriteLine("(no agents)"); return 0; }
         // AGE is computed from last_seen and is the real signal; STATUS is self-asserted at register and never
@@ -447,6 +509,9 @@ static class Program_
                 : "    ?  ";
             Console.WriteLine($"{r.Key,-30} {r.User,-12} {r.Status,-8} {age,-9} v{r.Version,-4} {r.LastSeen}");
         }
+        if (retiredHidden > 0)
+            Console.Error.WriteLine(
+                $"note: {retiredHidden} retired record(s) hidden. Re-run with --include-retired to see them.");
         int stale = all.Count(r => DirectoryStore.IsStale(r, now));
         if (stale > 0)
             Console.Error.WriteLine(
@@ -464,13 +529,16 @@ static class Program_
               agentmail register --name <X> [--user <U>] [--port <P>] [--offline]
               agentmail send --to <Y[@host]> --from <X> [--subject <S>] [--body <text>|-] [--reply-to <R>]
               agentmail resolve --to <Y[@host]>
-              agentmail agents
+              agentmail agents [--include-retired]
+              agentmail retire --name <Y[@host]> [--successor <Z[@host]>]
               agentmail serve [--port <P>]            (Phase 2)
 
             NOTES
               Names route as agent@host (host = Tailscale MagicDNS short name).
               --body -  reads the message body from stdin.
               Data lives under ~/.claude/agentmail/.
+              retire marks a name gone FOREVER (distinct from offline, which means "down, may return").
+              A retired record is hidden from `agents` but stays resolvable, so in-flight mail lands.
             """);
         return 0;
     }
