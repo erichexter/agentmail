@@ -70,18 +70,29 @@ public class StaleHostHintTests
     [Fact]
     public void When_every_candidate_is_stale_there_is_no_fresh_pick_to_offer()
     {
-        // 'wolf' today: windev2407eval and wolf-prime, both stale. The caller must fall back AND warn
-        // rather than present the least-old guess as a working address.
+        // Models 'wolf' as it was: two records (windev2407eval and wolf-prime), both stale. The caller must
+        // fall back AND warn rather than present the least-old guess as a working address.
+        //
+        // ⚠ The host names here are deliberately NOT the real ones, and that is the whole point. This test
+        // used the literal "wolf-prime", which made its result depend on WHICH MACHINE RAN IT: IsStale
+        // returns false for a LOCAL record ("a relay always knows which agents it hosts"), so on the box
+        // actually called wolf-prime that record is never stale and the Assert.Empty below fails. It passed
+        // everywhere else and failed on our self-hosted runner — main was shipping red on it. Any fixture
+        // that names a real fleet host is one relocation away from asserting something different.
+        string hostOld = "fixture-host-a", hostNewer = "fixture-host-b";
+        Assert.NotEqual(Paths.Host, hostOld);      // if these ever collide with the runner, say so loudly
+        Assert.NotEqual(Paths.Host, hostNewer);    // rather than silently inverting the assertion
+
         var all = new List<AgentRecord>
         {
-            Rec("windev2407eval", DateTime.UtcNow.AddDays(-17)),
-            Rec("wolf-prime",     DateTime.UtcNow.AddDays(-5)),
+            Rec(hostOld,   DateTime.UtcNow.AddDays(-17)),
+            Rec(hostNewer, DateTime.UtcNow.AddDays(-5)),
         };
 
         Assert.Empty(all.Where(r => !DirectoryStore.IsStale(r)));
 
         var fallback = all.OrderByDescending(r => DirectoryStore.TryParseLastSeen(r, out var t) ? t : DateTime.MinValue).First();
-        Assert.Equal("wolf-prime", fallback.Host);   // least-old, but still explicitly flagged stale to the user
+        Assert.Equal(hostNewer, fallback.Host);   // least-old, but still explicitly flagged stale to the user
     }
 
     [Fact]
