@@ -225,8 +225,24 @@ static class Program_
                             // FLAG-41: a malformed name is an OPERATOR error, not a crash. Seal.Create
                             // asserts LDH on both addresses; letting that escape printed a stack trace
                             // and made a name-shape problem look like a broken binary.
+                            // Seal env.Serialize(), NOT the bare body. The unsealed paths
+                            // (Relay.cs:112, Program.cs:309) both write env.Serialize(), which is what
+                            // emits the `---` frontmatter carrying id/from/to/subject/reply_to/sent.
+                            // The sealed path used to encrypt `body` alone, so an encrypted
+                            // cross-machine message arrived as a bare document with NO envelope: the
+                            // recipient could not see who sent it, what it was about, or what to reply
+                            // to. Measured 2026-09-03: four such messages to garrison and sixteen to
+                            // harrell, all legitimate, all arriving anonymous — and treated as
+                            // untrusted precisely because they could not be attributed from the file.
+                            //
+                            // The envelope goes INSIDE the seal deliberately. Composing it at the
+                            // receiver would put from/to/subject in cleartext on the wire, which is
+                            // what sealing exists to prevent. The outer SealedEnvelope keeps its own
+                            // MsgId for routing and replay-suppression; the inner `id:` stays the
+                            // sender's own envelope id, matching what the sender writes to its outbox
+                            // at line 262, so both ends record the same identifier for the message.
                             sealed_ = Seal.Create(senderId, recipientAddr, sealIdentPub!, sealKeyEpoch,
-                                NewMsgId(), System.Text.Encoding.UTF8.GetBytes(body), contentType: "text/markdown");
+                                NewMsgId(), env.SealPayload(), contentType: "text/markdown");
                         }
                         catch (NonConformingFieldException ex)
                         {
