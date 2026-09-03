@@ -19,6 +19,14 @@ sealed class Envelope
 
     [JsonIgnore] public string FileName => $"{Id}.msg.md";
 
+    /// <summary>
+    /// The bytes that go inside a seal. This exists as a named member ONLY so the choice is
+    /// testable: the 2026-09-03 bug was the sealed send passing the bare body here, and a test that
+    /// calls Seal.Create with the right input cannot catch a caller that passes the wrong one.
+    /// Whatever the unsealed paths write to an inbox, the sealed path must encrypt the same thing.
+    /// </summary>
+    public byte[] SealPayload() => System.Text.Encoding.UTF8.GetBytes(Serialize());
+
     public string Serialize()
     {
         var sb = new StringBuilder();
