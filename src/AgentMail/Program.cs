@@ -14,6 +14,8 @@ static class Program_
             return cli.Verb switch
             {
                 "register" => await Register(cli),
+                "heartbeat" => await Heartbeat(cli),
+                "prune" => Prune(cli),
                 "send" => await Send(cli),
                 "resolve" => Resolve(cli),
                 "agents" => await Agents(cli),
@@ -116,6 +118,106 @@ static class Program_
             }
         }
         return 0;
+    }
+
+    // heartbeat --name X [--min-hours 6] [--verbose]
+    //
+    // Liveness refresh, meant to be called by THIS agent's own inbox monitor on its normal poll cycle —
+    // NOT from a scheduled task. The point (per fleet design): only the agent that is actually monitoring
+    // its inbox can prove IT is alive; multiple agents share a host, so a machine-level timer can't tell a
+    // live agent from a dead one next to it. While the agent's monitor runs, last_seen stays fresh; when the
+    // session dies the monitor stops, last_seen freezes, the record ages past StaleAfter (untrusted for
+    // routing) and eventually `prune` reaps it.
+    //
+    // Self-rate-limited to --min-hours (default 6) so the monitor can call it every poll for free: it only
+    // actually bumps last_seen + gossips once the interval has elapsed. Bumps Version so the refresh wins
+    // LWW and propagates via gossip; deliberately does NOT republish the Keys bundle (a heartbeat is not a
+    // key change).
+    static async Task<int> Heartbeat(Cli cli)
+    {
+        string name = cli.Require("name");
+        var rec = DirectoryStore.Get(name, Paths.Host);
+        if (rec == null)
+            return Fail($"no local record for '{name}@{Paths.Host}'. Run `agentmail register --name {name} --push` first.");
+
+        double minHours = 6;
+        if (cli.Get("min-hours") is { } mh && double.TryParse(mh, out var parsed) && parsed > 0) minHours = parsed;
+
+        if (DirectoryStore.TryParseLastSeen(rec, out var seen)
+            && DateTime.UtcNow - seen < TimeSpan.FromHours(minHours))
+        {
+            if (cli.Has("verbose"))
+                Console.WriteLine($"heartbeat: {name} fresh ({(DateTime.UtcNow - seen).TotalHours:0.0}h < {minHours}h) — noop");
+            return 0;
+        }
+
+        rec.LastSeen = NowUtc();
+        rec.Status = "online";
+        rec.Version += 1;                 // advance LWW so the refreshed last_seen wins Merge and propagates
+        DirectoryStore.Save(rec);
+
+        var config = Config.Load();
+        int pushed = 0, failed = 0;
+        if (config.Seeds.Count > 0)
+        {
+            string token = config.EnsureToken();
+            foreach (var seed in config.Seeds)
+            {
+                var (ok, detail) = await Transport.Register(seed, token, rec);
+                if (ok) pushed++;
+                else { failed++; if (cli.Has("verbose")) Console.Error.WriteLine($"  push -> {seed}: FAILED {detail}"); }
+            }
+        }
+        Console.WriteLine($"heartbeat: {name}@{Paths.Host} v{rec.Version} last_seen={rec.LastSeen} " +
+                          $"(gossiped to {pushed} seed(s){(failed > 0 ? $", {failed} failed" : "")})");
+        return 0;
+    }
+
+    // prune [--older-than 14d] [--dry-run]
+    //
+    // Operator/relay-invoked reaping of directory records not seen since the cutoff. Wraps
+    // DirectoryStore.PruneExplicit, which NEVER deletes a locally-hosted record. Keep the cutoff LONG
+    // (default 14d, >> the 6h heartbeat and any brief outage) — the reason prune is not on a tight timer is
+    // the documented 202/404 flap: delete a still-live peer's record and gossip resurrects it seconds later.
+    // A 14d-stale record has no live peer refreshing it, so it stays reaped.
+    static int Prune(Cli cli)
+    {
+        var span = ParseDuration(cli.Get("older-than") ?? "14d");
+        if (span <= TimeSpan.Zero)
+            return Fail("--older-than must be a positive duration like 14d, 48h, or 30m");
+        var cutoff = DateTime.UtcNow - span;
+
+        var doomed = DirectoryStore.All()
+            .Where(r => !DirectoryStore.IsLocal(r)
+                        && DirectoryStore.TryParseLastSeen(r, out var t) && t < cutoff)
+            .OrderBy(r => r.Key).ToList();
+
+        if (cli.Has("dry-run"))
+        {
+            Console.WriteLine($"prune --dry-run: {doomed.Count} record(s) older than {span:%d}d{span.Hours}h " +
+                              $"(cutoff {cutoff:yyyy-MM-ddTHH:mm:ssZ}):");
+            foreach (var r in doomed) Console.WriteLine($"  {r.Key}  last_seen={r.LastSeen}  v{r.Version}");
+            return 0;
+        }
+
+        int n = DirectoryStore.PruneExplicit(cutoff);
+        Console.WriteLine($"pruned {n} record(s) not seen since {cutoff:yyyy-MM-ddTHH:mm:ssZ} (older than {cli.Get("older-than") ?? "14d"}).");
+        return 0;
+    }
+
+    // Parse a short duration like "14d", "48h", "30m", "90s". Returns Zero on anything malformed.
+    static TimeSpan ParseDuration(string s)
+    {
+        s = (s ?? "").Trim().ToLowerInvariant();
+        if (s.Length < 2 || !double.TryParse(s[..^1], out var v) || v < 0) return TimeSpan.Zero;
+        return s[^1] switch
+        {
+            'd' => TimeSpan.FromDays(v),
+            'h' => TimeSpan.FromHours(v),
+            'm' => TimeSpan.FromMinutes(v),
+            's' => TimeSpan.FromSeconds(v),
+            _ => TimeSpan.Zero,
+        };
     }
 
     // send --to Y --from X --subject S [--body text|-] [--reply-to R]
@@ -542,7 +644,9 @@ static class Program_
             agentmail — asynchronous agent messaging
 
             USAGE
-              agentmail register --name <X> [--user <U>] [--port <P>] [--offline]
+              agentmail register --name <X> [--user <U>] [--port <P>] [--offline] [--push]
+              agentmail heartbeat --name <X> [--min-hours <6>] [--verbose]
+              agentmail prune [--older-than <14d>] [--dry-run]
               agentmail send --to <Y[@host]> --from <X> [--subject <S>] [--body <text>|-] [--reply-to <R>]
               agentmail resolve --to <Y[@host]>
               agentmail agents [--include-retired]
@@ -555,6 +659,16 @@ static class Program_
               Data lives under ~/.claude/agentmail/.
               retire marks a name gone FOREVER (distinct from offline, which means "down, may return").
               A retired record is hidden from `agents` but stays resolvable, so in-flight mail lands.
+
+              heartbeat  Liveness refresh. Call it from THIS agent's own inbox monitor on its poll cycle
+                         (not a scheduled task): while the agent is monitoring its inbox it stays alive, so
+                         the monitor is the proof of life. Self-rate-limited to --min-hours (default 6): safe
+                         to call every poll — it only bumps last_seen + gossips once the interval elapses.
+              prune      Reap directory records not seen since the cutoff (default 14d). Never deletes a
+                         locally-hosted record. Keep the cutoff long; --dry-run to preview.
+              Who's alive: `agents` shows AGE + a STALE (!) marker — a fresh record (heartbeating) is alive;
+                         once an agent stops heartbeating it ages past AGENTMAIL_STALE_HOURS (default 24) and
+                         is no longer trusted for routing, then becomes prunable.
             """);
         return 0;
     }
