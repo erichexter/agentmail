@@ -11,6 +11,14 @@ static class Program_
         var cli = Cli.Parse(args);
         try
         {
+            // A real subcommand invoked with --help (e.g. `heartbeat --help`) must print help and exit 0 —
+            // NOT fall through to the handler and fail its Require(--name). A capability probe that guards on
+            // the exit code (`"$bin" heartbeat --help`) otherwise reads the rc=1 as "unsupported" and silently,
+            // permanently disables the feature next to a binary that supports it.
+            // (Field-verified on 0.5.0 by harrell@cto, relayed via steele, 2026-09-10.)
+            if (cli.Verb is not ("" or "help" or "--help" or "--version" or "version" or "--caps" or "caps")
+                && cli.Has("help")) return Help();
+
             return cli.Verb switch
             {
                 "register" => await Register(cli),
@@ -141,7 +149,11 @@ static class Program_
             return Fail($"no local record for '{name}@{Paths.Host}'. Run `agentmail register --name {name} --push` first.");
 
         double minHours = 6;
-        if (cli.Get("min-hours") is { } mh && double.TryParse(mh, out var parsed) && parsed > 0) minHours = parsed;
+        // Accept >= 0, not > 0: `--min-hours 0` is exactly what someone types to FORCE a refresh while
+        // testing; the old `> 0` guard treated 0 as unset and silently fell back to 6h (falsy-zero noop).
+        // 0 => the freshness window is TimeSpan.Zero, so the record is never "fresh" and always bumps.
+        // (Field-reported on 0.5.0 by harrell@cto via steele, 2026-09-10.)
+        if (cli.Get("min-hours") is { } mh && double.TryParse(mh, out var parsed) && parsed >= 0) minHours = parsed;
 
         if (DirectoryStore.TryParseLastSeen(rec, out var seen)
             && DateTime.UtcNow - seen < TimeSpan.FromHours(minHours))
